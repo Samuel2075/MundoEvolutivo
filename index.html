@@ -2513,6 +2513,11 @@
       return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
+    function formatHumanAge(ms = 0) {
+      const years = Math.max(0, Math.floor(ms / 1000));
+      return `${years} ${years === 1 ? 'ano' : 'anos'}`;
+    }
+
     function simplifyHumanAction(actionKey) {
       return humanReadableMode(actionKey);
     }
@@ -2529,7 +2534,7 @@
       human.lastLoggedMode = actionKey;
       const entry = {
         tempo: formatElapsedMs(simulationTimeMs),
-        idade: formatElapsedMs(human.ageMs),
+        idade: formatHumanAge(human.ageMs),
         acao: simplifyHumanAction(actionKey),
         detalhe: detail || '-',
         vida: Math.round(human.health),
@@ -3780,7 +3785,7 @@
         humano: human.name,
         motivo: deathReason,
         geracao: human.generation,
-        idade: formatElapsedMs(human.ageMs),
+        idade: formatHumanAge(human.ageMs),
         vida: Math.round(human.health),
         fome: Math.round(human.hunger),
         sede: Math.round(human.thirst),
@@ -4395,7 +4400,7 @@
             <div class="species-main">
               <span class="swatch" style="background:${shiftHexColor('#f4c38b', human.colorOffset)}"></span>
               <div class="species-info">
-                <div class="species-name">${human.name} • G${human.generation} • ${human.sex}</div>
+                <div class="species-name">${human.name} • G${human.generation} • ${human.sex} • ${formatHumanAge(human.ageMs)}</div>
                 <div class="species-sub">${humanReadableMode(human.mode)} • Vida ${Math.round(human.health)} • Fome ${Math.round(human.hunger)} • Sede ${Math.round(human.thirst)} • Score ${human.score || 0}</div>
                 <div class="species-sub">Base ${homeBase ? homeBase.name : 'nenhuma'} • Ações ${knownActions} • Filhos ${human.children || 0} • Bases ${human.basesBuilt || 0} • Caças ${human.successfulHunts || 0}</div>
                 <div class="species-sub">Mentor ancestral ${human.ancestralProfile ? `${human.ancestralProfile.name} (${human.ancestralProfile.score || 0} pts)` : 'nenhum'} • Madeira ${Math.round(human.inventory.wood)} • Pedra ${Math.round(human.inventory.stone)} • Arma ${(human.inventory.weapon || 0) > 0 ? 'Sim' : 'Não'} • Tocha ${(human.inventory.torch || 0) > 0 ? 'Sim' : 'Não'}${recentScore ? ` • Último score ${recentScore.valor > 0 ? '+' : ''}${recentScore.valor} (${recentScore.motivo})` : ''}</div>
