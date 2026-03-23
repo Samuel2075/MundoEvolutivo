@@ -797,7 +797,7 @@
         </summary>
         <div class="collapse-content">
           <p>
-            Os humanos agora podem caçar, pescar, coletar madeira e pedra, montar bases, guardar recursos, descansar apenas na base, curar ferimentos, trocar informações e acumular score individual por cooperação, caça, reprodução, armas e construção. Dentro da base, ficam protegidos de ataques animais e, quando estão seguros, agem de forma mais insaciável para ampliar o tempo de vida da civilização e o próprio score.
+            Os humanos agora podem caçar, pescar, coletar madeira e pedra, montar quantas bases forem necessárias, usando recursos combinados de 2 humanos por construção. Cada base abriga 2 humanos, protege contra ataques animais, permite descansar, curar ferimentos, trocar informações e acumular score individual por cooperação, caça, reprodução, armas e construção.
           </p>
           <div class="resource-grid">
             <div class="resource-entry"><span class="swatch" style="background:#fde68a"></span><span>Humanos vivos: <strong id="humanCountLabel">-</strong></span></div>
@@ -895,7 +895,7 @@
     const HUMAN_MAX_AGE_MS = 380000;
     const HUMAN_REPRODUCTION_DISTANCE = 26;
     const HUMAN_BASE_BUILD_COST = { wood: 16, stone: 10 };
-    const HUMAN_BASE_CAPACITY = 8;
+    const HUMAN_BASE_CAPACITY = 2;
     const HUMAN_BASE_BUILD_RADIUS = 24;
     const HUMAN_TRAIT_KEYS = ['speed', 'vision', 'courage', 'efficiency', 'fertility', 'wisdom'];
     const HUMAN_ALLOWED_BIOMES = ['plains', 'forest', 'swamp', 'mountain'];
@@ -906,8 +906,6 @@
     const HUMAN_ALLY_SUPPORT_RADIUS = TILE_SIZE * 6.5;
     const HUMAN_AUTO_SHARE_RADIUS = TILE_SIZE * 3.2;
     const HUMAN_GROUP_BUILD_RADIUS = TILE_SIZE * 7.5;
-    const HUMAN_BASE_PROTECTION_BONUS = 12;
-    const HUMAN_SCORE_AMBITION_MULTIPLIER = 0.22;
     const HUMAN_SCORE_RULES = Object.freeze({
       oldAgeFailure: -1,
       buildBase: 2,
@@ -1449,14 +1447,6 @@
       return results;
     }
 
-    function isHumanProtectedByBase(human, base = null) {
-      if (!human || !human.alive) return false;
-      const safeBase = base || findNearestBase(human, TILE_SIZE * 4.8, (candidate) => (candidate.integrity || 0) > 0);
-      if (!safeBase) return false;
-      const safeRadius = Math.max(22, (safeBase.radius || 0) + HUMAN_BASE_PROTECTION_BONUS);
-      return distanceSq(human.x, human.y, safeBase.x, safeBase.y) <= safeRadius * safeRadius;
-    }
-
     function estimateHumanCombatPower(human) {
       const stats = deriveHumanStats(human);
       const weaponBonus = (human.inventory.weapon || 0) > 0 ? 14 : 0;
@@ -1989,7 +1979,7 @@
           }
 
           const targetHuman = isHostileToHumans(animal.speciesId)
-            ? findNearestHuman(animal, species.vision * 0.92, (human) => human.alive && human.health > 0 && !isHumanProtectedByBase(human))
+            ? findNearestHuman(animal, species.vision * 0.92, (human) => human.alive && human.health > 0)
             : null;
 
           const preyDistSq = prey ? distanceSq(animal.x, animal.y, prey.x, prey.y) : Infinity;
@@ -1999,13 +1989,9 @@
             animal.mode = 'huntHuman';
             moveVector = normalize(targetHuman.x - animal.x, targetHuman.y - animal.y);
             if (humanDistSq <= species.attackRange * species.attackRange) {
-              if (!isHumanProtectedByBase(targetHuman)) {
-                targetHuman.health = Math.max(0, targetHuman.health - dtMs * 0.017 * Math.max(0.9, species.threat / 34));
-                targetHuman.mode = 'flee';
-                targetHuman.decisionCooldownMs = 0;
-              } else {
-                animal.mode = 'wander';
-              }
+              targetHuman.health = Math.max(0, targetHuman.health - dtMs * 0.017 * Math.max(0.9, species.threat / 34));
+              targetHuman.mode = 'flee';
+              targetHuman.decisionCooldownMs = 0;
               animal.decisionCooldownMs = 220;
             }
           } else if (prey) {
@@ -2134,6 +2120,43 @@
       return base ? (base.stock[key] || 0) : 0;
     }
 
+    function getBaseResidentCount(baseOrId) {
+      const baseId = typeof baseOrId === 'object' ? baseOrId?.id : baseOrId;
+      if (!baseId) return 0;
+      return humans.reduce((sum, human) => sum + ((human.alive && human.homeBaseId === baseId) ? 1 : 0), 0);
+    }
+
+    function baseHasCapacity(base, reserve = 0) {
+      if (!base) return false;
+      const capacity = base.capacity || HUMAN_BASE_CAPACITY;
+      return getBaseResidentCount(base) + reserve < capacity;
+    }
+
+    function findNearestAvailableBase(source, radius = Infinity, filterFn = null) {
+      return findNearestBase(source, radius, (base) => {
+        if (!baseHasCapacity(base)) return false;
+        return filterFn ? filterFn(base) : true;
+      });
+    }
+
+    function assignHumanHomeBase(human, preferredBase = null) {
+      if (!human || !human.alive) return null;
+      if (preferredBase && baseHasCapacity(preferredBase, human.homeBaseId === preferredBase.id ? -1 : 0)) {
+        human.homeBaseId = preferredBase.id;
+        return preferredBase;
+      }
+      if (human.homeBaseId) {
+        const currentBase = bases.find((base) => base.id === human.homeBaseId);
+        if (currentBase) return currentBase;
+      }
+      const availableBase = findNearestAvailableBase(human, TILE_SIZE * 18);
+      if (availableBase) {
+        human.homeBaseId = availableBase.id;
+        return availableBase;
+      }
+      return null;
+    }
+
     function getBuildSiteMissing(site, key) {
       return Math.max(0, HUMAN_BASE_BUILD_COST[key] - (site?.stored?.[key] || 0));
     }
@@ -2190,19 +2213,25 @@
         site.contributorIds.push(human.id);
       }
 
-      if (getBuildSiteMissing(site, 'wood') <= 0 && getBuildSiteMissing(site, 'stone') <= 0) {
+      const nearbyHumans = humans.filter((other) => other.alive && distanceSq(other.x, other.y, site.x, site.y) <= (TILE_SIZE * 8) ** 2);
+      const builders = (site.contributorIds || [])
+        .map((id) => findHumanById(id))
+        .filter((other) => other && other.alive);
+      const activeBuilders = [...new Map([...builders, ...nearbyHumans].map((other) => [other.id, other])).values()];
+
+      if (getBuildSiteMissing(site, 'wood') <= 0 && getBuildSiteMissing(site, 'stone') <= 0 && activeBuilders.length >= 2) {
         const base = createBase(site.x, site.y, null);
         tribeKnowledge.base = { x: base.x, y: base.y, refId: base.id, ttlMs: 120000 };
-        const nearbyHumans = humans.filter((other) => other.alive && distanceSq(other.x, other.y, site.x, site.y) <= (TILE_SIZE * 8) ** 2);
-        const builders = (site.contributorIds || [])
-          .map((id) => findHumanById(id))
-          .filter((other) => other && other.alive);
-        const awardedHumans = builders.length ? builders : nearbyHumans;
-        for (const other of nearbyHumans) {
-          other.homeBaseId = base.id;
+        const awardedHumans = activeBuilders.slice(0, Math.max(2, base.capacity || HUMAN_BASE_CAPACITY));
+        const residents = nearbyHumans
+          .slice()
+          .sort((a, b) => distanceSq(a.x, a.y, base.x, base.y) - distanceSq(b.x, b.y, base.x, base.y))
+          .slice(0, base.capacity || HUMAN_BASE_CAPACITY);
+        for (const other of residents) {
+          assignHumanHomeBase(other, base);
         }
         for (const builder of awardedHumans) {
-          builder.homeBaseId = base.id;
+          assignHumanHomeBase(builder, base);
           builder.basesBuilt = (builder.basesBuilt || 0) + 1;
           addHumanScore(builder, HUMAN_SCORE_RULES.buildBase, 'Base construída', `${base.name} concluída`);
           recordHumanAction(builder, 'buildBase', `${base.name} concluída`, true);
@@ -2230,6 +2259,7 @@
         x: clamp(x, 0, WORLD_WIDTH),
         y: clamp(y, 0, WORLD_HEIGHT),
         radius: 26,
+        capacity: HUMAN_BASE_CAPACITY,
         integrity: 100,
         stock: {
           food: builder ? Math.max(0, builder.inventory.food * 0.35) : 0,
@@ -2328,23 +2358,38 @@
       human.energy = 100;
       human.health = 100;
 
-      if (human.hunger > 0.5 && (base.stock.food > 0.2 || base.stock.meat > 0.2)) {
-        const meatNeed = Math.min(base.stock.meat || 0, human.hunger / 14);
-        if (meatNeed > 0) {
-          base.stock.meat -= meatNeed;
-          human.hunger = Math.max(0, human.hunger - meatNeed * 14);
+      if (human.hunger > 48 && (base.stock.food > 1 || base.stock.meat > 0.8)) {
+        const meatGain = Math.min(base.stock.meat || 0, 1.6);
+        if (meatGain > 0) {
+          base.stock.meat -= meatGain;
+          human.hunger = Math.max(0, human.hunger - meatGain * 14);
         }
-        if (human.hunger > 0.5 && base.stock.food > 0.2) {
-          const foodNeed = Math.min(base.stock.food, human.hunger / 12);
-          base.stock.food -= foodNeed;
-          human.hunger = Math.max(0, human.hunger - foodNeed * 12);
+        if (human.hunger > 38 && base.stock.food > 0.8) {
+          const gain = Math.min(base.stock.food, 2.2);
+          base.stock.food -= gain;
+          human.hunger = Math.max(0, human.hunger - gain * 12);
         }
       }
 
-      if (human.thirst > 0.5 && base.stock.water > 0.2) {
-        const waterNeed = Math.min(base.stock.water, human.thirst / 14);
-        base.stock.water -= waterNeed;
-        human.thirst = Math.max(0, human.thirst - waterNeed * 14);
+      if (human.thirst > 44 && base.stock.water > 0.8) {
+        const gain = Math.min(base.stock.water, 2.8);
+        base.stock.water -= gain;
+        human.thirst = Math.max(0, human.thirst - gain * 14);
+      }
+
+      if (human.health < 100) {
+        let medUse = 0;
+        if ((human.inventory.medicine || 0) > 0.4) {
+          medUse = Math.min(human.inventory.medicine, 1.4);
+          human.inventory.medicine -= medUse;
+        } else if ((base.stock.medicine || 0) > 0.4) {
+          medUse = Math.min(base.stock.medicine, 1.6);
+          base.stock.medicine -= medUse;
+        }
+        if (medUse > 0) {
+          human.health = 100;
+          human.energy = 100;
+        }
       }
     }
 
@@ -2963,7 +3008,7 @@
         targetKind: 'wander',
         targetRefId: null,
         decisionCooldownMs: randomBetween(rng, 0, 260),
-        reproductionCooldownMs: randomBetween(rng, 18000, 42000),
+        reproductionCooldownMs: randomBetween(rng, 2000, 8000),
         aidCooldownMs: 0,
         ageMs: generation === 1 ? randomBetween(rng, 18000, 56000) : 0,
         generation,
@@ -3252,13 +3297,16 @@
       const buildSite = findNearestBuildSite(human, HUMAN_GROUP_BUILD_RADIUS);
       const woodStored = buildSite ? (buildSite.stored.wood || 0) : 0;
       const stoneStored = buildSite ? (buildSite.stored.stone || 0) : 0;
+      const groupWood = group.wood + woodStored;
+      const groupStone = group.stone + stoneStored;
+      const enoughBuilders = group.members >= 2;
       return {
-        groupWood: group.wood + woodStored,
-        groupStone: group.stone + stoneStored,
+        groupWood,
+        groupStone,
         members: group.members,
         weapons: group.weapons,
-        canBuildSoon: !nearestBase && (group.wood + woodStored) >= HUMAN_BASE_BUILD_COST.wood * 0.45 && (group.stone + stoneStored) >= HUMAN_BASE_BUILD_COST.stone * 0.45,
-        siteReady: !nearestBase && (group.wood + woodStored) >= HUMAN_BASE_BUILD_COST.wood && (group.stone + stoneStored) >= HUMAN_BASE_BUILD_COST.stone
+        canBuildSoon: enoughBuilders && groupWood >= HUMAN_BASE_BUILD_COST.wood && groupStone >= HUMAN_BASE_BUILD_COST.stone,
+        siteReady: enoughBuilders && groupWood >= HUMAN_BASE_BUILD_COST.wood && groupStone >= HUMAN_BASE_BUILD_COST.stone
       };
     }
 
@@ -3399,27 +3447,6 @@
       };
     }
 
-    function getHumanAmbitionProfile(human, stats, nearestBase, nearbyHuman) {
-      const ageRatio = clamp(human.ageMs / Math.max(1, stats.ageLimit), 0, 1.6);
-      const ancestryTarget = Math.max(4, Math.round((human.ancestralScoreMemory || 0) * HUMAN_SCORE_AMBITION_MULTIPLIER));
-      const lifetimeTarget = Math.round(ageRatio * 8) + Math.max(0, human.generation - 1);
-      const lineageTarget = Math.max(0, 2 - (human.children || 0)) * 2;
-      const foundationTarget = Math.max(0, 1 - (human.basesBuilt || 0)) * 3;
-      const dynamicTarget = ancestryTarget + lifetimeTarget + lineageTarget + foundationTarget;
-      const scoreGap = Math.max(0, dynamicTarget - (human.score || 0));
-      const canPush = human.health > 56 && human.energy > 18 && human.hunger < 78 && human.thirst < 74;
-      const wantsLegacy = ageRatio > 0.22 && (((human.children || 0) <= 0) || ((human.basesBuilt || 0) <= 0));
-      const restless = canPush && (scoreGap > 0 || wantsLegacy || (!!nearestBase && !!nearbyHuman));
-      return {
-        ageRatio,
-        dynamicTarget,
-        scoreGap,
-        canPush,
-        wantsLegacy,
-        restless
-      };
-    }
-
     function spawnInitialHumans() {
       humans = [];
       bases = [];
@@ -3479,7 +3506,7 @@
         created.x = tx;
         created.y = ty;
         created.homeBaseId = null;
-        created.reproductionCooldownMs = randomBetween(simulationRng, 8000, 18000);
+        created.reproductionCooldownMs = randomBetween(simulationRng, 2500, 9000);
         created.ageMs = randomBetween(simulationRng, 26000, 68000);
         recordHumanAction(created, 'wander', 'início da nova civilização', true);
       }
@@ -3808,7 +3835,7 @@
       if (homeBase) {
         child.x = homeBase.x + randomBetween(simulationRng, -10, 10);
         child.y = homeBase.y + randomBetween(simulationRng, -10, 10);
-        child.homeBaseId = homeBase.id;
+        assignHumanHomeBase(child, homeBase);
       }
       humans.push(child);
       currentRunChildrenBorn += 1;
@@ -3821,8 +3848,8 @@
       parentB.hasReproduced = true;
       addHumanScore(parentA, HUMAN_SCORE_RULES.reproduce, 'Reprodução', `gerou ${child.name}`);
       addHumanScore(parentB, HUMAN_SCORE_RULES.reproduce, 'Reprodução', `gerou ${child.name}`);
-      parentA.reproductionCooldownMs = randomBetween(simulationRng, 12000, 22000) * (1.05 - parentA.genes.fertility * 0.28);
-      parentB.reproductionCooldownMs = randomBetween(simulationRng, 12000, 22000) * (1.05 - parentB.genes.fertility * 0.28);
+      parentA.reproductionCooldownMs = randomBetween(simulationRng, 8000, 16000) * (1.03 - parentA.genes.fertility * 0.24);
+      parentB.reproductionCooldownMs = randomBetween(simulationRng, 8000, 16000) * (1.03 - parentB.genes.fertility * 0.24);
       refreshSocietyUnlocks();
     }
 
@@ -3927,7 +3954,7 @@
         }
       } else if (human.targetKind === 'store' && nearestBase) {
         storeAtBase(human, nearestBase);
-        human.homeBaseId = nearestBase.id;
+        assignHumanHomeBase(human, nearestBase);
       } else if (human.targetKind === 'buildBase') {
         let site = findNearestBuildSite(human, TILE_SIZE * 4.5);
         if (!site) {
@@ -3936,7 +3963,7 @@
         if (contributeToBuildSite(human, site)) {
           const builtBase = findNearestBase(site, TILE_SIZE * 2.5);
           if (builtBase) {
-            human.homeBaseId = builtBase.id;
+            assignHumanHomeBase(human, builtBase);
             tryCraftHumanTools(human, builtBase);
           }
         }
@@ -3958,7 +3985,7 @@
       const dtSeconds = dtMs / 1000;
       decayTribeKnowledge(dtMs);
       autoShareKnowledgeForNearbyHumans();
-      const desiredBaseCount = Math.max(1, Math.ceil(humans.length / HUMAN_BASE_CAPACITY));
+      const desiredBaseCount = Number.POSITIVE_INFINITY;
       const collectiveWood = totalHumanInventoryResource('wood');
       const collectiveStone = totalHumanInventoryResource('stone');
       const collectiveFood = totalHumanInventoryResource('food') + totalHumanInventoryResource('meat');
@@ -3994,9 +4021,10 @@
           continue;
         }
 
-        const nearestBase = findNearestBase(human, stats.vision * 1.2);
+        const homeBase = human.homeBaseId ? bases.find((base) => base.id === human.homeBaseId) : null;
+        const nearestBase = homeBase || findNearestBase(human, stats.vision * 1.2);
         const nearestBuildSite = findNearestBuildSite(human, stats.vision * 1.2);
-        if (nearestBase && !human.homeBaseId) human.homeBaseId = nearestBase.id;
+        if (!human.homeBaseId) assignHumanHomeBase(human, nearestBase || null);
         if (nearestBase) {
           if ((human.hunger > 52 || human.thirst > 50) && supplyHumanFromBase(human, nearestBase)) {
             human.mode = 'aidAlly';
@@ -4007,19 +4035,17 @@
         } else if (((human.inventory.weapon || 0) < 1 && (human.inventory.wood + human.inventory.stone) >= 5) || ((human.inventory.torch || 0) < 1 && human.inventory.wood >= 2)) {
           tryCraftHumanTools(human, null);
         }
-        const shelteredByBase = isHumanProtectedByBase(human, nearestBase);
         const nearbyHuman = findNearestHuman(human, TILE_SIZE * 2.6);
         const tribeUnderArmed = collectiveWeapons < Math.max(3, Math.ceil(humans.length * 0.35));
         const emergencyNeedWeapon = ((human.inventory.weapon || 0) < 1) && (((human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood')) >= 3) && (((human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone')) >= 2) && (human.hunger < 82 && human.thirst < 82) && (((human.targetKind === 'hunt') || (human.recentDamageMs || 0) > 0 || human.health < 84 || tribeUnderArmed));
         if (emergencyNeedWeapon) {
           tryCraftHumanTools(human, nearestBase || null);
         }
-        const nearbyPredator = findNearestAnimal(human, stats.fleeRadius + (shelteredByBase ? 12 : 36), (animal) => {
+        const nearbyPredator = findNearestAnimal(human, stats.fleeRadius + 36, (animal) => {
           const species = SPECIES_MAP[animal.speciesId];
           return !!species && isHostileToHumans(species.id);
         });
-        const risk = getHumanRiskAssessment(human, stats, nearestBase, shelteredByBase ? null : nearbyPredator);
-        const ambition = getHumanAmbitionProfile(human, stats, nearestBase, nearbyHuman);
+        const risk = getHumanRiskAssessment(human, stats, nearestBase, nearbyPredator);
         const survivalPressure = risk.criticalWater || risk.criticalFood || risk.criticalHealth || risk.recentDamage;
         human.lastRiskCause = risk.primary;
         tryEmergencySelfCare(human, nearestBase, dtMs);
@@ -4028,24 +4054,7 @@
         let moveVector = null;
 
         if (nearbyPredator) {
-          if (shelteredByBase && nearestBase) {
-            if (canHumansDefendAgainstPredator(human, nearbyPredator) && human.health > 34 && human.energy > 16) {
-              human.mode = 'defend';
-              human.taskCommitMs = 1800;
-              targetAnimal = nearbyPredator;
-              human.targetKind = 'defend';
-              human.targetX = nearbyPredator.x;
-              human.targetY = nearbyPredator.y;
-              moveVector = normalize(nearbyPredator.x - human.x, nearbyPredator.y - human.y);
-            } else {
-              human.mode = 'guard';
-              human.targetKind = 'guard';
-              human.targetX = nearestBase.x;
-              human.targetY = nearestBase.y;
-              human.taskCommitMs = Math.max(human.taskCommitMs || 0, 1200);
-              moveVector = null;
-            }
-          } else if (canHumansDefendAgainstPredator(human, nearbyPredator) && human.health > 34 && human.energy > 16) {
+          if (canHumansDefendAgainstPredator(human, nearbyPredator) && human.health > 34 && human.energy > 16) {
             human.mode = 'defend';
             human.taskCommitMs = 1800;
             targetAnimal = nearbyPredator;
@@ -4088,7 +4097,7 @@
           const survivalPressureNow = criticalWater || criticalFood || risk.criticalHealth || risk.recentDamage || human.health < (42 + longevityUrgency * 1.1);
           const baseWoodAvailable = (human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood');
           const baseStoneAvailable = (human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone');
-          const canReproduce = human.ageMs >= HUMAN_MATURE_AGE_MS && human.reproductionCooldownMs <= 0 && human.health > (lineagePressure >= 8 ? 42 : 48) && human.energy > Math.max(14, (lineagePressure >= 8 ? 18 : 22) - ancestralReproductionBias * 2.2) && human.hunger < Math.min(90, (lineagePressure >= 8 ? 82 : 76) + ancestralReproductionBias * 2.5) && human.thirst < Math.min(88, (lineagePressure >= 8 ? 80 : 74) + ancestralReproductionBias * 2.5) && humans.length < HUMAN_POPULATION_CAP && !!nearestBase;
+          const canReproduce = human.ageMs >= HUMAN_MATURE_AGE_MS && human.reproductionCooldownMs <= 0 && human.health > (lineagePressure >= 8 ? 38 : 44) && human.energy > Math.max(10, (lineagePressure >= 8 ? 14 : 18) - ancestralReproductionBias * 2.2) && human.hunger < Math.min(94, (lineagePressure >= 8 ? 86 : 80) + ancestralReproductionBias * 2.5) && human.thirst < Math.min(92, (lineagePressure >= 8 ? 84 : 78) + ancestralReproductionBias * 2.5) && humans.length < HUMAN_POPULATION_CAP;
           const carryingResources = human.inventory.food + human.inventory.water + human.inventory.meat + human.inventory.wood + human.inventory.stone + human.inventory.medicine > 12;
           const needsHeal = human.knownActions.includes('curar') && !!nearestBase && (human.health < 82 || risk.recentDamage);
           const needsMoreBases = bases.length < desiredBaseCount;
@@ -4098,7 +4107,7 @@
           const buildReadiness = getBaseBuildReadiness(human, nearestBase);
           const buildUrgencyFactor = baseUrgency > 0 ? Math.max(0.24, 0.6 - baseUrgency * 0.015 - lineagePressure * 0.01 - ancestralBuildBias * 0.05) : Math.max(0.26, 0.6 - lineagePressure * 0.01 - ancestralBuildBias * 0.05);
           const tribeBuildSoon = !nearestBase && !buildSites.length && collectiveWood >= HUMAN_BASE_BUILD_COST.wood * buildUrgencyFactor && collectiveStone >= HUMAN_BASE_BUILD_COST.stone * buildUrgencyFactor;
-          const canStartBuildSite = human.knownActions.includes('construir base') && needsMoreBases && !buildSites.length && human.ageMs >= HUMAN_MATURE_AGE_MS * Math.max(0.35, 0.55 - ancestralBuildBias * 0.08) && ((buildReadiness.members >= Math.max(1, 2 - Math.round(ancestralTeamworkBias * 0.5)) && buildReadiness.canBuildSoon) || tribeBuildSoon || (ancestralBuildBias >= 1.1 && collectiveWood >= HUMAN_BASE_BUILD_COST.wood * 0.72 && collectiveStone >= HUMAN_BASE_BUILD_COST.stone * 0.72));
+          const canStartBuildSite = human.knownActions.includes('construir base') && needsMoreBases && !activeBuildSite && buildReadiness.members >= 2 && buildReadiness.siteReady;
           const shouldContributeToBuild = !!activeBuildSite && ((human.inventory.wood || 0) > 0.4 || (human.inventory.stone || 0) > 0.4 || buildReadiness.siteReady);
           const tribeNeedsBaseUrgently = !nearestBase && (buildReadiness.canBuildSoon || buildReadiness.siteReady || tribeBuildSoon || (lineagePressure >= 8 && buildReadiness.members >= 2)) && !criticalWater && !criticalFood;
           const needsWood = human.knownActions.includes('coletar madeira') && ((needsMoreBases && (!nearestBase || !activeBuildSite || siteNeedsWood || collectiveWood + (activeBuildSite ? activeBuildSite.stored.wood : 0) < HUMAN_BASE_BUILD_COST.wood)) || (nearestBase && getBaseStock(nearestBase, 'wood') < 10) || (lineagePressure >= 8 && !nearestBase && collectiveWood < HUMAN_BASE_BUILD_COST.wood));
@@ -4110,12 +4119,6 @@
           const shouldCraftForSurvival = ((human.inventory.weapon || 0) < 1) && (((human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood')) >= 3) && (((human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone')) >= 2) && !criticalWater && !criticalFood && (tribeUnderArmed || risk.recentDamage || human.health < 88 || weaponUrgency >= 4 || ancestralWeaponBias >= 0.8 || ancestralHuntBias >= 0.9);
           const feelsCrowded = !!nearbyHuman && distanceSq(human.x, human.y, nearbyHuman.x, nearbyHuman.y) < (TILE_SIZE * 1.7) ** 2;
           const hasCommittedTask = human.taskCommitMs > 0 && !survivalPressureNow && !feelsCrowded;
-          const ambitiousKnowledge = wantsKnowledgeExchange && ambition.restless && (ambition.scoreGap > 0 || shareUrgency >= 4 || (human.knowledgeShares || 0) < 2);
-          const ambitiousReproduction = canReproduce && ambition.restless && ((human.children || 0) <= 0 || ambition.scoreGap >= 2 || lineagePressure >= 6);
-          const ambitiousBuildNow = ambition.restless && (needsMoreBases || (human.basesBuilt || 0) <= 0 || baseUrgency >= 4) && (canStartBuildSite || shouldContributeToBuild || needsWood || needsStone);
-          const ambitiousPrey = !criticalFood && !criticalWater && ambition.canPush && !tribeNeedsBaseUrgently && !baseNeedsFood
-            ? findNearestAnimal(human, stats.vision * 1.75, (animal) => humanCanHuntSpecies(human, animal.speciesId))
-            : null;
 
           if (risk.recentDamage || risk.criticalHealth) {
             human.taskCommitMs = 0;
@@ -4178,28 +4181,28 @@
               }
             } else if (shouldCraftForSurvival) {
               assignHumanTarget(human, 'craftWeapon', 'craftWeapon', human.x, human.y, `craft:weapon:${human.id}`, 1800);
-            } else if (ambitiousReproduction || (canReproduce && lineagePressure >= 8)) {
-              const partner = findNearestHuman(human, stats.vision * 1.15, (other) => {
-                if (other.sex === human.sex || other.ageMs < HUMAN_MATURE_AGE_MS || other.reproductionCooldownMs > 0 || other.health <= 42 || other.energy <= 18) return false;
-                const otherBase = findNearestBase(other, TILE_SIZE * 5);
-                return !!otherBase && !!nearestBase && otherBase.id === nearestBase.id;
+            } else if (canReproduce && lineagePressure >= 8) {
+              const partner = findNearestHuman(human, stats.vision * 1.25, (other) => {
+                return other.sex !== human.sex && other.ageMs >= HUMAN_MATURE_AGE_MS && other.reproductionCooldownMs <= 0 && other.health > 38 && other.energy > 12;
               });
               if (partner) {
-                assignHumanTarget(human, 'mate', 'mate', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 3600);
-              } else {
+                assignHumanTarget(human, 'mate', 'mate', partner.x, partner.y, `human:${partner.id}`, 3600);
+              } else if (nearestBase) {
                 assignHumanTarget(human, 'guard', 'guard', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 2200);
+              } else {
+                pickHumanWanderTarget(human, 'general');
               }
-            } else if (ambitiousKnowledge || wantsKnowledgeExchange) {
+            } else if (wantsKnowledgeExchange) {
               assignHumanTarget(human, 'knowledgeShare', 'knowledgeShare', nearbyHuman.x, nearbyHuman.y, `human:${nearbyHuman.id}`, 1800);
-            } else if ((tribeNeedsBaseUrgently || ambitiousBuildNow) && activeBuildSite) {
+            } else if (tribeNeedsBaseUrgently && activeBuildSite) {
               assignHumanTarget(human, 'buildBase', 'buildBase', activeBuildSite.x, activeBuildSite.y, `site:${activeBuildSite.id}`, 5200);
-            } else if (canStartBuildSite && (ambitiousBuildNow || needsMoreBases)) {
+            } else if (canStartBuildSite) {
               const buildSpot = chooseBaseBuildSpot(human);
               const site = createBuildSite(buildSpot.x, buildSpot.y, human);
               assignHumanTarget(human, 'buildBase', 'buildBase', site.x, site.y, `site:${site.id}`, 5400);
-            } else if (shouldContributeToBuild && (ambitiousBuildNow || tribeNeedsBaseUrgently || needsMoreBases)) {
+            } else if (shouldContributeToBuild) {
               assignHumanTarget(human, 'buildBase', 'buildBase', activeBuildSite.x, activeBuildSite.y, `site:${activeBuildSite.id}`, 4200);
-            } else if (needsWood && human.inventory.wood < HUMAN_BASE_BUILD_COST.wood * 0.9 && (ambitiousBuildNow || needsMoreBases || tribeNeedsBaseUrgently || baseUrgency >= 4)) {
+            } else if (needsWood && human.inventory.wood < HUMAN_BASE_BUILD_COST.wood * 0.9) {
               const wood = findNearestResource(human, stats.vision * 1.35, new Set(['wood'])) || findNearestResourceGlobal(human, new Set(['wood']), TILE_SIZE * 30);
               if (wood) {
                 rememberHumanMemory(human, 'wood', wood, 44000);
@@ -4207,7 +4210,7 @@
               } else {
                 pickHumanWanderTarget(human, 'wood');
               }
-            } else if (needsStone && human.inventory.stone < HUMAN_BASE_BUILD_COST.stone * 0.9 && (ambitiousBuildNow || needsMoreBases || tribeNeedsBaseUrgently || baseUrgency >= 4)) {
+            } else if (needsStone && human.inventory.stone < HUMAN_BASE_BUILD_COST.stone * 0.9) {
               const stone = findNearestResource(human, stats.vision * 1.35, new Set(['stone'])) || findNearestResourceGlobal(human, new Set(['stone']), TILE_SIZE * 30);
               if (stone) {
                 rememberHumanMemory(human, 'stone', stone, 44000);
@@ -4215,27 +4218,24 @@
               } else {
                 pickHumanWanderTarget(human, 'stone');
               }
-            } else if (ambitiousPrey && (human.genes.courage > 0.24 || (human.inventory.weapon || 0) > 0 || ancestralHuntBias >= 0.7 || ambition.scoreGap >= 2)) {
-              targetAnimal = ambitiousPrey;
-              assignHumanTarget(human, 'hunt', 'hunt', ambitiousPrey.x, ambitiousPrey.y, `animal:${ambitiousPrey.id}`, 4200);
             } else if ((carryingResources || baseNeedsFood || baseNeedsWater) && nearestBase && human.knownActions.includes('armazenar') && (human.inventory.food > 7 || human.inventory.water > 7 || human.inventory.meat > 5 || human.inventory.wood > 2 || human.inventory.stone > 2)) {
               assignHumanTarget(human, 'store', 'store', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 2800);
             } else if (needsHeal) {
               assignHumanTarget(human, 'heal', 'rest', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 3200);
-            } else if (lowEnergy && nearestBase && human.knownActions.includes('descansar na base') && (!ambition.restless || human.energy < 16 || human.health < 70)) {
+            } else if (lowEnergy && nearestBase && human.knownActions.includes('descansar na base')) {
               assignHumanTarget(human, 'rest', 'rest', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 3200);
             } else if (baseNeedsRepair) {
               assignHumanTarget(human, 'repairBase', 'repairBase', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 3600);
             } else if (canReproduce) {
-              const partner = findNearestHuman(human, stats.vision * 1.1, (other) => {
-                if (other.sex === human.sex || other.ageMs < HUMAN_MATURE_AGE_MS || other.reproductionCooldownMs > 0 || other.health <= 50 || other.energy <= 24) return false;
-                const otherBase = findNearestBase(other, TILE_SIZE * 5);
-                return !!otherBase && !!nearestBase && otherBase.id === nearestBase.id;
+              const partner = findNearestHuman(human, stats.vision * 1.2, (other) => {
+                return other.sex !== human.sex && other.ageMs >= HUMAN_MATURE_AGE_MS && other.reproductionCooldownMs <= 0 && other.health > 38 && other.energy > 12;
               });
               if (partner) {
-                assignHumanTarget(human, 'mate', 'mate', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 3200);
-              } else {
+                assignHumanTarget(human, 'mate', 'mate', partner.x, partner.y, `human:${partner.id}`, 3200);
+              } else if (nearestBase) {
                 assignHumanTarget(human, 'guard', 'guard', nearestBase.x, nearestBase.y, `base:${nearestBase.id}`, 2200);
+              } else {
+                pickHumanWanderTarget(human, 'general');
               }
             } else if (nearestBase && baseNeedsWater) {
               const water = getHumanMemoryTarget(human, 'water') || (() => { const w = findNearestResource(human, stats.vision * 1.45, new Set(['water'])) || findNearestResourceGlobal(human, new Set(['water']), TILE_SIZE * 40); return w ? { kind:'water', x:w.x, y:w.y, ref:`resource:${w.x}:${w.y}` } : null; })();
@@ -4276,6 +4276,19 @@
             }
           }
 
+          if (human.targetKind === 'mate') {
+            const partnerId = Number(String(human.targetRefId || '').split(':')[1]);
+            const partner = findHumanById(partnerId);
+            if (partner && partner.alive && partner.reproductionCooldownMs <= 0) {
+              human.targetX = partner.x;
+              human.targetY = partner.y;
+              human.mode = 'mate';
+            } else {
+              human.decisionCooldownMs = 0;
+              human.taskCommitMs = 0;
+            }
+          }
+
           if (human.targetKind === 'hunt' || human.targetKind === 'defend') {
             targetAnimal = targetAnimal || findNearestAnimal(human, stats.vision * 1.7, (animal) => human.targetKind === 'defend' ? isHostileToHumans(animal.speciesId) : humanCanHuntSpecies(human, animal.speciesId));
             if (targetAnimal) {
@@ -4296,13 +4309,11 @@
           }
         }
 
-        if (human.mode === 'mate' && nearestBase) {
+        if (human.mode === 'mate') {
           const partner = findNearestHuman(human, HUMAN_REPRODUCTION_DISTANCE, (other) => {
-            if (other.sex === human.sex || other.reproductionCooldownMs > 0 || other.ageMs < HUMAN_MATURE_AGE_MS || other.health < 48 || other.energy < 22) return false;
-            const otherBase = findNearestBase(other, TILE_SIZE * 5);
-            return !!otherBase && otherBase.id === nearestBase.id;
+            return other.sex !== human.sex && other.reproductionCooldownMs <= 0 && other.ageMs >= HUMAN_MATURE_AGE_MS && other.health > 38 && other.energy > 12;
           });
-          if (partner && distanceSq(human.x, human.y, nearestBase.x, nearestBase.y) <= (nearestBase.radius + HUMAN_REPRODUCTION_DISTANCE) ** 2) {
+          if (partner) {
             createHumanChild(human, partner);
             human.mode = 'wander';
             human.taskCommitMs = 0;
