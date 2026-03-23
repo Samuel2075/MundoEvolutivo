@@ -4967,7 +4967,7 @@
             <div class="species-main">
               <span class="swatch" style="background:${shiftHexColor('#f4c38b', human.colorOffset)}"></span>
               <div class="species-info">
-                <div class="species-name">${human.name} • G${human.generation} • ${human.sex}</div>
+                <div class="species-name">${human.name} • G${human.generation} • ${human.sex} • ${Math.floor(human.ageMs / 1000 * 0.21)} anos</div>
                 <div class="species-sub">${humanReadableMode(human.mode)} • Vida ${Math.round(human.health)} • Fome ${Math.round(human.hunger)} • Sede ${Math.round(human.thirst)} • Score ${human.score || 0}</div>
                 <div class="species-sub">Base ${homeBase ? homeBase.name : 'nenhuma'} • Ações ${knownActions} • Filhos ${human.children || 0} • Bases ${human.basesBuilt || 0} • Caças ${human.successfulHunts || 0}</div>
                 <div class="species-sub">Mentor ancestral ${human.ancestralProfile ? `${human.ancestralProfile.name} (${human.ancestralProfile.score || 0} pts)` : 'nenhum'} • Madeira ${Math.round(human.inventory.wood)} • Pedra ${Math.round(human.inventory.stone)} • Arma ${(human.inventory.weapon || 0) > 0 ? 'Sim' : 'Não'} • Tocha ${(human.inventory.torch || 0) > 0 ? 'Sim' : 'Não'}${recentScore ? ` • Último score ${recentScore.valor > 0 ? '+' : ''}${recentScore.valor} (${recentScore.motivo})` : ''}</div>
