@@ -914,8 +914,192 @@
       teamwork: 2,
       craftWeapon: 1,
       huntDeath: -1,
-      successfulHunt: 2
+      successfulHunt: 2,
+      mlFitness: 1
     });
+
+    // Machine Learning: Rede Neural Leve para Tomada de Decisão
+    // Arquitetura: 14 entradas → 12 ocultos (tanh) → 14 ações (softmax)
+    // Treinamento: TD-Learning (temporal difference) com recompensa por sobrevivência
+    const ML_INPUT_SIZE  = 14;
+    const ML_HIDDEN_SIZE = 12;
+    const ML_OUTPUT_SIZE = 14; // uma saída por ação possível
+    const ML_ACTIONS = ['drink','forage','gatherWood','gatherStone','fish','scavenge','hunt',
+                        'buildBase','store','rest','heal','mate','knowledgeShare','aidAlly'];
+    const ML_LR       = 0.018;  // learning rate
+    const ML_DISCOUNT = 0.82;   // fator de desconto TD
+    const ML_EXPLORE  = 0.08;   // epsilon-greedy: chance de ação aleatória
+    const ML_MUTATE_RATE = 0.04; // taxa de mutação dos pesos herdados
+
+    // Cria pesos aleatórios para uma nova rede neural
+    function mlCreateWeights(rng) {
+      const w1 = [];
+      for (let i = 0; i < ML_INPUT_SIZE * ML_HIDDEN_SIZE; i++) {
+        w1.push(randomBetween(rng, -0.6, 0.6));
+      }
+      const b1 = [];
+      for (let i = 0; i < ML_HIDDEN_SIZE; i++) b1.push(randomBetween(rng, -0.1, 0.1));
+      const w2 = [];
+      for (let i = 0; i < ML_HIDDEN_SIZE * ML_OUTPUT_SIZE; i++) {
+        w2.push(randomBetween(rng, -0.6, 0.6));
+      }
+      const b2 = [];
+      for (let i = 0; i < ML_OUTPUT_SIZE; i++) b2.push(randomBetween(rng, -0.1, 0.1));
+      return { w1, b1, w2, b2 };
+    }
+
+    // Herda e muta pesos de dois pais
+    function mlInheritWeights(parentA, parentB, rng) {
+      const inherit = (arrA, arrB) => arrA.map((vA, i) => {
+        const vB = arrB[i];
+        const mid = (vA + vB) * 0.5;
+        const mutation = randomBetween(rng, -ML_MUTATE_RATE, ML_MUTATE_RATE);
+        return clamp(mid + mutation, -3.0, 3.0);
+      });
+      return {
+        w1: inherit(parentA.w1, parentB.w1),
+        b1: inherit(parentA.b1, parentB.b1),
+        w2: inherit(parentA.w2, parentB.w2),
+        b2: inherit(parentA.b2, parentB.b2)
+      };
+    }
+
+    // Forward pass: retorna Q-values para cada ação
+    function mlForward(nn, inputs) {
+      // Camada oculta (tanh)
+      const hidden = [];
+      for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+        let sum = nn.b1[h];
+        for (let i = 0; i < ML_INPUT_SIZE; i++) {
+          sum += inputs[i] * nn.w1[i * ML_HIDDEN_SIZE + h];
+        }
+        hidden.push(Math.tanh(sum));
+      }
+      // Camada de saída (linear, Q-values)
+      const qValues = [];
+      for (let o = 0; o < ML_OUTPUT_SIZE; o++) {
+        let sum = nn.b2[o];
+        for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+          sum += hidden[h] * nn.w2[h * ML_OUTPUT_SIZE + o];
+        }
+        qValues.push(sum);
+      }
+      return { hidden, qValues };
+    }
+
+    // TD update: ajusta pesos baseado em recompensa recebida
+    function mlTDUpdate(nn, inputs, actionIndex, reward, nextInputs) {
+      const { hidden, qValues } = mlForward(nn, inputs);
+      const { qValues: nextQ } = mlForward(nn, nextInputs);
+      const targetQ = reward + ML_DISCOUNT * Math.max(...nextQ);
+      const tdError  = targetQ - qValues[actionIndex];
+
+      // Backprop simplificado (gradiente direto)
+      const dOut = new Array(ML_OUTPUT_SIZE).fill(0);
+      dOut[actionIndex] = tdError * ML_LR;
+
+      // Atualiza w2 e b2
+      for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+        for (let o = 0; o < ML_OUTPUT_SIZE; o++) {
+          nn.w2[h * ML_OUTPUT_SIZE + o] += dOut[o] * hidden[h];
+        }
+      }
+      for (let o = 0; o < ML_OUTPUT_SIZE; o++) {
+        nn.b2[o] += dOut[o];
+      }
+
+      // Backprop para camada oculta
+      const dHidden = new Array(ML_HIDDEN_SIZE).fill(0);
+      for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+        for (let o = 0; o < ML_OUTPUT_SIZE; o++) {
+          dHidden[h] += dOut[o] * nn.w2[h * ML_OUTPUT_SIZE + o];
+        }
+        dHidden[h] *= (1 - hidden[h] * hidden[h]); // derivada tanh
+      }
+
+      for (let i = 0; i < ML_INPUT_SIZE; i++) {
+        for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+          nn.w1[i * ML_HIDDEN_SIZE + h] += dHidden[h] * inputs[i] * ML_LR;
+        }
+      }
+      for (let h = 0; h < ML_HIDDEN_SIZE; h++) {
+        nn.b1[h] += dHidden[h] * ML_LR;
+      }
+
+      return Math.abs(tdError); // retorna magnitude do erro para debug
+    }
+
+    // Normaliza estado do humano em vetor de inputs [0..1]
+    function mlGetStateInputs(human, stats, risk, ctx) {
+      const foodAmount = getHumanFoodAmount(human);
+      return [
+        human.health  / 100,                                    // 0: saúde
+        Math.max(0, 100 - human.hunger)  / 100,                 // 1: saciedade (inverso da fome)
+        Math.max(0, 100 - human.thirst)  / 100,                 // 2: hidratação
+        human.energy  / 100,                                    // 3: energia
+        clamp(foodAmount / 20, 0, 1),                           // 4: comida no inventário
+        clamp((human.inventory.water || 0) / 20, 0, 1),         // 5: água no inventário
+        clamp(((human.inventory.wood || 0) + (human.inventory.stone || 0)) / 20, 0, 1), // 6: materiais
+        (human.inventory.weapon || 0) > 0 ? 1 : 0,             // 7: tem arma
+        ctx.nearestBase ? 1 : 0,                                // 8: há base próxima
+        clamp(human.ageMs / HUMAN_MAX_AGE_MS, 0, 1),           // 9: maturidade
+        human.genes.wisdom,                                     // 10: sabedoria genética
+        human.genes.courage,                                    // 11: coragem genética
+        risk.primary === 'predator' ? 1 : 0,                    // 12: predador próximo
+        clamp((humans.length) / 20, 0, 1)                       // 13: pressão populacional
+      ];
+    }
+
+    // Calcula recompensa imediata para aprendizado por reforço
+    function mlComputeReward(human, prevState, dtMs) {
+      if (!prevState) return 0;
+      let reward = 0;
+      // Sobrevivência = recompensa base por cada tick vivo
+      reward += 0.04;
+      // Variações de saúde/fome/sede
+      const healthDelta = (human.health   - prevState.health)   / 100;
+      const hungerDelta = (prevState.hunger - human.hunger)     / 100; // positivo se reduziu fome
+      const thirstDelta = (prevState.thirst - human.thirst)     / 100; // positivo se reduziu sede
+      reward += healthDelta * 1.4;
+      reward += hungerDelta * 1.2;
+      reward += thirstDelta * 1.2;
+      // Penalidade por situação crítica
+      if (human.health   < 30) reward -= 0.8;
+      if (human.hunger   > 80) reward -= 0.6;
+      if (human.thirst   > 80) reward -= 0.6;
+      if (human.energy   < 15) reward -= 0.3;
+      // Bônus por conquistas
+      if ((human.children || 0) > (prevState.children || 0))     reward += 2.5;
+      if ((human.basesBuilt || 0) > (prevState.basesBuilt || 0)) reward += 2.0;
+      if ((human.successfulHunts || 0) > (prevState.successfulHunts || 0)) reward += 1.5;
+      if ((human.knowledgeShares || 0) > (prevState.knowledgeShares || 0)) reward += 0.8;
+      if ((human.teamworkCount || 0) > (prevState.teamworkCount || 0))     reward += 0.5;
+      // Penalidade por receber dano
+      if ((human.recentDamageMs || 0) > 0 && prevState.health > human.health) reward -= 0.4;
+      return clamp(reward, -3.0, 3.0);
+    }
+
+    // Escolhe ação via rede neural (epsilon-greedy)
+    function mlChooseAction(human, inputs) {
+      // Exploração aleatória (menor com mais experiência/sabedoria)
+      const exploreRate = ML_EXPLORE * (1 - human.genes.wisdom * 0.6);
+      if (Math.random() < exploreRate) {
+        return Math.floor(Math.random() * ML_OUTPUT_SIZE);
+      }
+      const { qValues } = mlForward(human.nn, inputs);
+      // Retorna índice do maior Q-value
+      let bestIdx = 0;
+      for (let i = 1; i < qValues.length; i++) {
+        if (qValues[i] > qValues[bestIdx]) bestIdx = i;
+      }
+      return bestIdx;
+    }
+
+    // Converte índice de ação ML para modo/targetKind do humano
+    function mlActionToHumanMode(actionIndex) {
+      return ML_ACTIONS[actionIndex] || 'wander';
+    }
+    // ── Fim do sistema ML
 
     const worldSizeLabel = document.getElementById('worldSize');
     const resourceCountLabel = document.getElementById('resourceCount');
@@ -2407,7 +2591,7 @@
         craftTorch: 'Fabricando tocha',
         wander: 'Explorando'
       };
-      return labels[mode] || 'Explorando';
+      return labels[mode];
     }
 
     function createEmptyCivilizationArchive() {
@@ -2628,7 +2812,10 @@
         scoreLog: (record.scoreLog || []).slice(-8),
         actionCounts,
         dominantActions,
-        legacyScore: computeAncestorLegacyScore(record)
+        legacyScore: computeAncestorLegacyScore(record),
+        mlTotalReward: record.mlTotalReward || 0,
+        mlUpdateCounter: record.mlUpdateCounter || 0,
+        nnWeights: record.nnWeights || null
       };
     }
 
@@ -2727,6 +2914,19 @@
       human.ancestralLegacyScore = profile.legacyScore || 0;
       human.ancestralScoreLog = [...(profile.scoreLog || [])];
       human.ancestralActionLog = [...(profile.recentActions || [])];
+
+      // Herança dos pesos neurais do ancestral (se disponíveis)
+      // Com mutação para permitir diversidade
+      if (profile.nnWeights && human.nn) {
+        const w = profile.nnWeights;
+        const mutationScale = 0.06 * (1 - Math.min(0.8, (profile.mlUpdateCounter || 0) / 200));
+        const mutate = (v) => clamp(v + (Math.random() - 0.5) * 2 * mutationScale, -3.0, 3.0);
+        human.nn.w1 = w.w1.map(mutate);
+        human.nn.b1 = w.b1.map(mutate);
+        human.nn.w2 = w.w2.map(mutate);
+        human.nn.b2 = w.b2.map(mutate);
+      }
+
       return human;
     }
 
@@ -3025,7 +3225,15 @@
         recentDamageMs: 0,
         lastRiskCause: null,
         lastX: tile.x + TILE_SIZE * 0.5,
-        lastY: tile.y + TILE_SIZE * 0.5
+        lastY: tile.y + TILE_SIZE * 0.5,
+        // ── ML neural network ──────────────────────────────────────
+        nn: mlCreateWeights(rng),     // pesos da rede neural (genes de ML)
+        mlLastInputs: null,           // último vetor de inputs (para TD update)
+        mlLastAction: -1,             // último índice de ação escolhido pela rede
+        mlLastState: null,            // snapshot de estado para calcular recompensa
+        mlTotalReward: 0,             // recompensa acumulada (fitness ML)
+        mlUpdateCounter: 0            // contador de atualizações da rede
+        // ────────────────────────────────────────────────────────────
       };
       applyAncestralKnowledgeToHuman(human);
       return human;
@@ -3729,6 +3937,11 @@
       if (diedOfOldAge && !human.hasReproduced && (human.basesBuilt || 0) <= 0) {
         addHumanScore(human, HUMAN_SCORE_RULES.oldAgeFailure, 'Velhice sem legado', 'não se reproduziu e não construiu base');
       }
+      // Bônus de fitness ML: recompensa acumulada pela rede neural traduz em score
+      if ((human.mlTotalReward || 0) > 0) {
+        const mlBonus = Math.round(clamp(human.mlTotalReward * 0.12, 0, 18));
+        if (mlBonus > 0) addHumanScore(human, mlBonus, 'Fitness ML', `aprendizado total ${human.mlTotalReward.toFixed(1)}`);
+      }
       const recentActions = (human.actionLog || []).slice(-10);
       const summaryRow = {
         humano: human.name,
@@ -3757,6 +3970,9 @@
         actionCounts: { ...(human.actionCounts || {}) },
         scoreLog: [...(human.scoreLog || [])],
         ancestralProfile: human.ancestralProfile ? { ...human.ancestralProfile } : null,
+        mlTotalReward: human.mlTotalReward || 0,
+        mlUpdateCounter: human.mlUpdateCounter || 0,
+        nnWeights: human.nn ? { w1: [...human.nn.w1], b1: [...human.nn.b1], w2: [...human.nn.w2], b2: [...human.nn.b2] } : null,
         summary: summaryRow
       });
       console.groupCollapsed(`☠️ ${human.name} morreu • ${deathReason}`);
@@ -3784,6 +4000,10 @@
         genes[trait] = mutateInheritedGene((parentA.genes[trait] + parentB.genes[trait]) / 2, simulationRng);
       }
       const child = createHumanFromGenes(baseTile, genes, simulationRng, Math.max(parentA.generation, parentB.generation) + 1);
+      // Herança da rede neural: filho recebe média dos pesos dos pais com mutação
+      if (parentA.nn && parentB.nn) {
+        child.nn = mlInheritWeights(parentA.nn, parentB.nn, simulationRng);
+      }
       child.inventory.food = randomBetween(simulationRng, 2, 4);
       child.inventory.water = randomBetween(simulationRng, 2, 4);
       if (homeBase) {
@@ -4108,6 +4328,7 @@
     }
 
     function chooseHumanUtilityDecision(human, ctx) {
+      // Fase 1: construir lista de candidatos válidos (mesma lógica anterior)
       const candidates = [];
       const push = (candidate) => {
         const enriched = makeHumanUtilityCandidate(human, candidate);
@@ -4349,8 +4570,63 @@
         score: 1.2
       });
 
+      if (!candidates.length) return { wanderPurpose: 'general', score: 0 };
+
+      // Fase 2: ML re-ranking via rede neural
+      // A rede neural aprende a re-ordenar candidatos baseado em experiência vivida
+      const inputs = mlGetStateInputs(human, ctx.stats, ctx.risk, ctx);
+
+      // Mapeamento: targetKind do candidato → índice ML_ACTIONS
+      const actionToMlIdx = {};
+      ML_ACTIONS.forEach((a, i) => { actionToMlIdx[a] = i; });
+
+      // Forward pass para obter Q-values aprendidos
+      const { qValues } = mlForward(human.nn, inputs);
+
+      // Normaliza Q-values para range razoável de bônus/penalidade
+      const qMin = Math.min(...qValues);
+      const qMax = Math.max(...qValues);
+      const qRange = Math.max(0.001, qMax - qMin);
+
+      // Aplica Q-values como bônus normalizado em cima dos scores utilitários
+      // O peso do ML aumenta com a experiência (mais updates = mais confiança)
+      const mlConfidence = clamp(human.mlUpdateCounter / 80, 0, 1) * human.genes.wisdom;
+      const mlWeight = 12 + mlConfidence * 22; // 12..34 pts de influência máxima
+
+      for (const candidate of candidates) {
+        const actionKey = candidate.targetKind || candidate.mode;
+        const mlIdx = actionToMlIdx[actionKey];
+        if (mlIdx !== undefined) {
+          const qNorm = (qValues[mlIdx] - qMin) / qRange; // 0..1
+          candidate.score += (qNorm - 0.5) * mlWeight;    // bônus/penalidade simétrica
+        }
+      }
+
+      // Guarda contexto para TD update no próximo tick
+      human.mlLastInputs  = inputs;
+      human.mlLastAction  = -1; // será definido abaixo
+      human.mlLastState   = {
+        health: human.health,
+        hunger: human.hunger,
+        thirst: human.thirst,
+        energy: human.energy,
+        children: human.children || 0,
+        basesBuilt: human.basesBuilt || 0,
+        successfulHunts: human.successfulHunts || 0,
+        knowledgeShares: human.knowledgeShares || 0,
+        teamworkCount: human.teamworkCount || 0
+      };
+
+      // Fase 3: seleciona o melhor candidato (já com ML re-ranking) ──
       candidates.sort((a, b) => b.score - a.score);
-      return candidates[0] || { wanderPurpose: 'general', score: 0 };
+      const chosen = candidates[0] || { wanderPurpose: 'general', score: 0 };
+
+      // Registra ação escolhida para TD update
+      const chosenActionKey = chosen.targetKind || chosen.mode;
+      const chosenMlIdx = actionToMlIdx[chosenActionKey];
+      if (chosenMlIdx !== undefined) human.mlLastAction = chosenMlIdx;
+
+      return chosen;
     }
 
     function updateHumans(dtMs, now) {
@@ -4537,6 +4813,21 @@
             if (decision && decision.targetKind === 'hunt') {
               targetAnimal = findNearestAnimal(human, stats.vision * 1.7, (animal) => humanCanHuntSpecies(human, animal.speciesId));
             }
+
+            // TD-Learning update
+            // Atualiza a rede neural com a recompensa da última ação tomada
+            if (human.mlLastInputs && human.mlLastAction >= 0 && human.mlLastState && human.nn) {
+              const reward = mlComputeReward(human, human.mlLastState, dtMs);
+              const nextInputs = mlGetStateInputs(human, stats, risk, decisionContext);
+              mlTDUpdate(human.nn, human.mlLastInputs, human.mlLastAction, reward, nextInputs);
+              human.mlTotalReward = (human.mlTotalReward || 0) + reward;
+              human.mlUpdateCounter = (human.mlUpdateCounter || 0) + 1;
+              // Bonus de score ML: humanos que aprendem bem ganham score extra
+              if (reward > 0.8 && (human.mlUpdateCounter % 12 === 0)) {
+                addHumanScore(human, Math.floor(reward * 0.5), 'Aprendizado ML', `recompensa ${reward.toFixed(2)}`);
+              }
+            }
+            // ───────────────────────────────────────────────────────────────
           }
 
           if (human.targetKind === 'aidWater' || human.targetKind === 'aidFood' || human.targetKind === 'knowledgeShare') {
@@ -4680,6 +4971,7 @@
                 <div class="species-sub">${humanReadableMode(human.mode)} • Vida ${Math.round(human.health)} • Fome ${Math.round(human.hunger)} • Sede ${Math.round(human.thirst)} • Score ${human.score || 0}</div>
                 <div class="species-sub">Base ${homeBase ? homeBase.name : 'nenhuma'} • Ações ${knownActions} • Filhos ${human.children || 0} • Bases ${human.basesBuilt || 0} • Caças ${human.successfulHunts || 0}</div>
                 <div class="species-sub">Mentor ancestral ${human.ancestralProfile ? `${human.ancestralProfile.name} (${human.ancestralProfile.score || 0} pts)` : 'nenhum'} • Madeira ${Math.round(human.inventory.wood)} • Pedra ${Math.round(human.inventory.stone)} • Arma ${(human.inventory.weapon || 0) > 0 ? 'Sim' : 'Não'} • Tocha ${(human.inventory.torch || 0) > 0 ? 'Sim' : 'Não'}${recentScore ? ` • Último score ${recentScore.valor > 0 ? '+' : ''}${recentScore.valor} (${recentScore.motivo})` : ''}</div>
+                <div class="species-sub">🧠 ML: ${human.mlUpdateCounter || 0} treinos • recompensa acumulada ${(human.mlTotalReward || 0).toFixed(1)} • confiança ${Math.round(clamp((human.mlUpdateCounter || 0) / 80, 0, 1) * human.genes.wisdom * 100)}%</div>
               </div>
             </div>
             <div class="species-meta">
