@@ -889,7 +889,7 @@
     const SIM_TICK_MS = 140;
     const HUMAN_DRAW_ZOOM_THRESHOLD = 0.14;
     const ENTITY_LABEL_ZOOM_THRESHOLD = 0.2;
-    const HUMAN_POPULATION_CAP = Number.POSITIVE_INFINITY;
+    const HUMAN_POPULATION_CAP = Number.POSITIVE_INFINITY;;
     const HUMAN_MATURE_AGE_MS = 36000;
     const HOSTILE_TO_HUMANS = new Set(['wolf', 'lynx', 'bear', 'hyena', 'crocodile', 'eagle', 'boar']);
     const HUMAN_MAX_AGE_MS = 380000;
@@ -2197,6 +2197,7 @@
           for (const builder of awardedHumans) {
             builder.teamworkCount = (builder.teamworkCount || 0) + 1;
             addHumanScore(builder, HUMAN_SCORE_RULES.teamwork, 'Trabalho em equipe', `${base.name} concluída em grupo`);
+            recordHumanAction(builder, 'aidAlly', `${base.name} concluída em grupo`, true);
           }
         }
         buildSites = buildSites.filter((entry) => entry.id !== site.id);
@@ -2424,6 +2425,10 @@
         actionTotals: {},
         deathTotals: {},
         ancestorDeaths: [],
+        ancestorProfiles: [],
+        ancestralActionMemory: {},
+        ancestralScoreMemory: [],
+        lastMentorsUsed: [],
         lastRun: null,
         lessons: {
           waterUrgency: 0,
@@ -2511,6 +2516,16 @@
     function captureCurrentCivilizationRun() {
       const averageWisdom = currentRunHumansBorn > 0 ? currentRunGeneSums.wisdom / currentRunHumansBorn : 0;
       const averageEfficiency = currentRunHumansBorn > 0 ? currentRunGeneSums.efficiency / currentRunHumansBorn : 0;
+      const deathRecords = currentRunDeathRecords.map((item) => ({
+        ...item,
+        recentActions: item.recentActions ? [...item.recentActions] : [],
+        actionCounts: { ...(item.actionCounts || {}) },
+        scoreLog: item.scoreLog ? [...item.scoreLog] : []
+      }));
+      const ancestorProfiles = deathRecords
+        .map((item, index) => buildAncestorProfileFromDeathRecord(item, index))
+        .sort((a, b) => (b.legacyScore || 0) - (a.legacyScore || 0) || (b.score || 0) - (a.score || 0))
+        .slice(0, 12);
       return {
         elapsedMs: simulationTimeMs,
         basesBuilt: totalBasesBuiltThisRun,
@@ -2518,7 +2533,8 @@
         averageWisdom,
         averageEfficiency,
         actionTotals: { ...currentRunActionTotals },
-        deathRecords: currentRunDeathRecords.map((item) => ({ ...item, recentActions: item.recentActions ? [...item.recentActions] : [] })),
+        deathRecords,
+        ancestorProfiles,
         scoreLeaders: currentRunDeathRecords
           .map((item) => ({
             nome: item.humanName,
@@ -2565,6 +2581,155 @@
       };
     }
 
+    function mapActionToAncestralKey(actionKey) {
+      const map = {
+        buildBase: 'buildBase',
+        mate: 'reproduce',
+        knowledgeShare: 'knowledgeShare',
+        craftWeapon: 'craftWeapon',
+        hunt: 'hunt',
+        defend: 'teamwork',
+        aidAlly: 'teamwork',
+        aidWater: 'teamwork',
+        aidFood: 'teamwork',
+        guard: 'teamwork',
+        repairBase: 'teamwork',
+        store: 'teamwork'
+      };
+      return map[actionKey] || actionKey;
+    }
+
+    function computeAncestorLegacyScore(record = {}) {
+      return Math.max(0, (record.score || 0))
+        + Math.max(0, (record.children || 0) * 1.35)
+        + Math.max(0, (record.basesBuilt || 0) * 1.9)
+        + Math.max(0, (record.generation || 1) * 0.35);
+    }
+
+    function buildAncestorProfileFromDeathRecord(record, index = 0) {
+      const actionCounts = { ...(record.actionCounts || {}) };
+      const dominantActions = Object.entries(actionCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([action, total]) => ({
+          action,
+          label: simplifyHumanAction(action),
+          total
+        }));
+      return {
+        id: `${record.humanName || 'ancestral'}-${record.generation || 1}-${index}`,
+        name: record.humanName || `Ancestral ${index + 1}`,
+        score: record.score || 0,
+        generation: record.generation || 1,
+        children: record.children || 0,
+        basesBuilt: record.basesBuilt || 0,
+        deathReason: record.reason || 'desconhecida',
+        recentActions: (record.recentActions || []).slice(-8),
+        scoreLog: (record.scoreLog || []).slice(-8),
+        actionCounts,
+        dominantActions,
+        legacyScore: computeAncestorLegacyScore(record)
+      };
+    }
+
+    function mergeAncestorProfiles(existingProfiles = [], incomingProfiles = [], limit = 24) {
+      const profileMap = new Map();
+      for (const profile of [...existingProfiles, ...incomingProfiles]) {
+        if (!profile || !profile.name) continue;
+        const key = `${profile.name}|G${profile.generation || 1}|${profile.deathReason || 'desconhecida'}`;
+        const current = profileMap.get(key);
+        if (!current || (profile.legacyScore || 0) > (current.legacyScore || 0)) {
+          profileMap.set(key, {
+            ...profile,
+            recentActions: [...(profile.recentActions || [])],
+            scoreLog: [...(profile.scoreLog || [])],
+            actionCounts: { ...(profile.actionCounts || {}) },
+            dominantActions: [...(profile.dominantActions || [])]
+          });
+        }
+      }
+      return [...profileMap.values()]
+        .sort((a, b) =>
+          (b.legacyScore || 0) - (a.legacyScore || 0)
+          || (b.score || 0) - (a.score || 0)
+          || (b.generation || 0) - (a.generation || 0)
+          || a.name.localeCompare(b.name, 'pt-BR'))
+        .slice(0, limit);
+    }
+
+    function deriveAncestralActionMemory(ancestorProfiles = []) {
+      const memory = {};
+      for (const profile of ancestorProfiles) {
+        const weightBase = 1 + Math.max(0, (profile.score || 0)) * 0.35 + Math.max(0, profile.basesBuilt || 0) * 0.9 + Math.max(0, profile.children || 0) * 0.75;
+        for (const [actionKey, total] of Object.entries(profile.actionCounts || {})) {
+          const mapped = mapActionToAncestralKey(actionKey);
+          incrementCounter(memory, mapped, total * weightBase);
+        }
+      }
+      return memory;
+    }
+
+    function buildAncestralScoreMemory(ancestorProfiles = [], limit = 10) {
+      return [...ancestorProfiles]
+        .sort((a, b) => (b.score || 0) - (a.score || 0) || (b.legacyScore || 0) - (a.legacyScore || 0))
+        .slice(0, limit)
+        .map((profile) => ({
+          name: profile.name,
+          score: profile.score || 0,
+          generation: profile.generation || 1,
+          principalAcoes: (profile.dominantActions || []).slice(0, 3).map((item) => item.label)
+        }));
+    }
+
+    function selectAncestorProfileForHuman(seedIndex = 0) {
+      const profiles = civilizationArchive?.ancestorProfiles || [];
+      if (!profiles.length) return null;
+      return profiles[seedIndex % profiles.length] || profiles[0] || null;
+    }
+
+    function getHumanAncestralBias(human, key) {
+      if (!human || !human.ancestralActionBias) return 0;
+      return human.ancestralActionBias[key] || 0;
+    }
+
+    function applyAncestralKnowledgeToHuman(human) {
+      if (!human) return human;
+      const profile = selectAncestorProfileForHuman(Math.max(0, (human.id || 1) - 1));
+      if (!profile) return human;
+
+      const rawBias = {};
+      let maxBias = 0;
+      for (const [actionKey, total] of Object.entries(profile.actionCounts || {})) {
+        const mapped = mapActionToAncestralKey(actionKey);
+        rawBias[mapped] = (rawBias[mapped] || 0) + total;
+        maxBias = Math.max(maxBias, rawBias[mapped] || 0);
+      }
+
+      const archiveActionMemory = civilizationArchive?.ancestralActionMemory || {};
+      const strongestArchiveAction = Object.values(archiveActionMemory).reduce((best, value) => Math.max(best, value || 0), 0) || 1;
+      const normalizedBias = {};
+      const keys = new Set([...Object.keys(rawBias), ...Object.keys(archiveActionMemory)]);
+      for (const key of keys) {
+        const localWeight = maxBias > 0 ? (rawBias[key] || 0) / maxBias : 0;
+        const archiveWeight = strongestArchiveAction > 0 ? (archiveActionMemory[key] || 0) / strongestArchiveAction : 0;
+        normalizedBias[key] = Number(clamp(localWeight * 0.75 + archiveWeight * 0.45, 0, 2.2).toFixed(3));
+      }
+
+      human.ancestralProfile = {
+        name: profile.name,
+        score: profile.score || 0,
+        generation: profile.generation || 1,
+        dominantActions: [...(profile.dominantActions || [])],
+        deathReason: profile.deathReason || 'desconhecida'
+      };
+      human.ancestralActionBias = normalizedBias;
+      human.ancestralScoreMemory = profile.score || 0;
+      human.ancestralLegacyScore = profile.legacyScore || 0;
+      human.ancestralScoreLog = [...(profile.scoreLog || [])];
+      human.ancestralActionLog = [...(profile.recentActions || [])];
+      return human;
+    }
+
     function mergeRunIntoCivilizationArchive(run) {
       civilizationArchive.cycles += 1;
       civilizationArchive.totalBasesBuilt += run.basesBuilt || 0;
@@ -2583,6 +2748,14 @@
         incrementCounter(civilizationArchive.deathTotals, death.reason, 1);
       }
       civilizationArchive.ancestorDeaths = [...civilizationArchive.ancestorDeaths, ...(run.deathRecords || [])].slice(-60);
+      civilizationArchive.ancestorProfiles = mergeAncestorProfiles(civilizationArchive.ancestorProfiles || [], run.ancestorProfiles || [], 24);
+      civilizationArchive.ancestralActionMemory = deriveAncestralActionMemory(civilizationArchive.ancestorProfiles || []);
+      civilizationArchive.ancestralScoreMemory = buildAncestralScoreMemory(civilizationArchive.ancestorProfiles || [], 12);
+      civilizationArchive.lastMentorsUsed = (civilizationArchive.ancestorProfiles || []).slice(0, 8).map((profile) => ({
+        name: profile.name,
+        score: profile.score || 0,
+        generation: profile.generation || 1
+      }));
       civilizationArchive.lastRun = run;
       civilizationArchive.lessons = deriveCivilizationLessons(civilizationArchive);
       return civilizationArchive;
@@ -2600,8 +2773,17 @@
       console.log('Lições herdadas:', archive.lessons);
       const topDeaths = summarizeTopEntries(archive.deathTotals, 6);
       const topActions = summarizeTopEntries(archive.actionTotals, 8).map((item) => ({ acao: simplifyHumanAction(item.nome), total: item.total }));
+      const topAncestors = (archive.ancestorProfiles || []).slice(0, 6).map((profile) => ({
+        ancestral: profile.name,
+        score: profile.score || 0,
+        geracao: profile.generation || 1,
+        bases: profile.basesBuilt || 0,
+        filhos: profile.children || 0,
+        acoes: (profile.dominantActions || []).slice(0, 3).map((item) => item.label).join(', ')
+      }));
       if (topDeaths.length) console.table(topDeaths);
       if (topActions.length) console.table(topActions);
+      if (topAncestors.length) console.table(topAncestors);
       console.groupEnd();
     }
 
@@ -2662,6 +2844,12 @@
       }));
       const topAncestorDeaths = summarizeTopEntries(archive.deathTotals, 6);
       const topScoreLeaders = (runSummary.scoreLeaders || []).slice(0, 6);
+      const ancestralMentors = (archive.ancestorProfiles || []).slice(0, 6).map((profile) => ({
+        nome: profile.name,
+        total: `${profile.score || 0} pts`,
+        generation: profile.generation || 1,
+        dominantActions: (profile.dominantActions || []).slice(0, 3).map((item) => item.label).join(', ')
+      }));
       const inheritedLessons = Object.entries(archive.lessons || {})
         .filter(([, value]) => value > 0)
         .sort((a, b) => b[1] - a[1]);
@@ -2733,12 +2921,16 @@
             <ol class="cycle-list">${formatTopList(topScoreLeaders, 'Nenhum score foi consolidado neste ciclo.', (item) => `${item.nome}: <strong>${item.total}</strong> • G${item.generation} • filhos ${item.filhos} • bases ${item.bases}` )}</ol>
           </section>
           <section class="cycle-panel">
+            <h3>Ancestrais que vão ensinar o próximo ciclo</h3>
+            <ol class="cycle-list">${formatTopList(ancestralMentors, 'Ainda não há mentores ancestrais suficientes.', (item) => `${item.nome}: <strong>${item.total}</strong> • G${item.generation} • ações ${item.dominantActions || 'nenhuma ação forte'}` )}</ol>
+          </section>
+          <section class="cycle-panel">
             <h3>Lições herdadas para o próximo ciclo</h3>
             <ol class="cycle-list">${formatTopList(inheritedLessons.map(([nome, total]) => ({ nome, total })), 'Nenhuma lição forte foi consolidada ainda.', (item) => `${humanizeLessonKey(item.nome)}: <strong>${item.total}</strong>` )}</ol>
           </section>
         </div>
         <div class="cycle-note">
-          <strong>Próximo ciclo:</strong> a nova civilização vai nascer no ciclo <strong>${summary.nextCycleNumber}</strong> com acesso ao conhecimento herdado sobre água, comida, construção, armas, cooperação, reprodução e erros mais comuns dos antepassados. Bases construídas ao longo da história: <strong>${archive.totalBasesBuilt}</strong>. Filhos gerados ao longo da história: <strong>${archive.totalChildrenBorn || 0}</strong>. Sabedoria média herdada: <strong>${Math.round((archive.lastAverageWisdom || 0) * 100)}%</strong>. Eficiência média herdada: <strong>${Math.round((archive.lastAverageEfficiency || 0) * 100)}%</strong>.
+          <strong>Próximo ciclo:</strong> a nova civilização vai nascer no ciclo <strong>${summary.nextCycleNumber}</strong> com acesso ao conhecimento herdado sobre água, comida, construção, armas, cooperação, reprodução e erros mais comuns dos antepassados. Agora ela também herda a memória dos melhores indivíduos, preservando <strong>score</strong>, <strong>ações dominantes</strong> e exemplos dos ancestrais com maior legado. Bases construídas ao longo da história: <strong>${archive.totalBasesBuilt}</strong>. Filhos gerados ao longo da história: <strong>${archive.totalChildrenBorn || 0}</strong>. Sabedoria média herdada: <strong>${Math.round((archive.lastAverageWisdom || 0) * 100)}%</strong>. Eficiência média herdada: <strong>${Math.round((archive.lastAverageEfficiency || 0) * 100)}%</strong>.
         </div>
       `;
 
@@ -2760,7 +2952,7 @@
       currentRunHumansBorn += 1;
       currentRunGeneSums.wisdom += genes.wisdom;
       currentRunGeneSums.efficiency += genes.efficiency;
-      return {
+      const human = {
         id: ++humanIdCounter,
         name: `Humano ${String(humanIdCounter).padStart(2, '0')}`,
         x: tile.x + TILE_SIZE * 0.5 + (rng() - 0.5) * TILE_SIZE * 0.35,
@@ -2816,6 +3008,12 @@
           threat: null
         },
         ancestralLessons: { ...(civilizationArchive.lessons || {}) },
+        ancestralProfile: null,
+        ancestralActionBias: {},
+        ancestralScoreMemory: 0,
+        ancestralLegacyScore: 0,
+        ancestralScoreLog: [],
+        ancestralActionLog: [],
         actionLog: [],
         actionCounts: {},
         lastActionSignature: null,
@@ -2829,6 +3027,8 @@
         lastX: tile.x + TILE_SIZE * 0.5,
         lastY: tile.y + TILE_SIZE * 0.5
       };
+      applyAncestralKnowledgeToHuman(human);
+      return human;
     }
 
     function findSpawnTileForHumans(rng, maxAttempts = 220) {
@@ -2941,6 +3141,8 @@
         receiver.teamworkCount = (receiver.teamworkCount || 0) + 1;
         addHumanScore(donor, HUMAN_SCORE_RULES.teamwork, 'Trabalho em equipe', `ajudou ${receiver.name} com água`);
         addHumanScore(receiver, HUMAN_SCORE_RULES.teamwork, 'Trabalho em equipe', `recebeu ajuda de ${donor.name}`);
+        recordHumanAction(donor, 'aidAlly', `ajudou ${receiver.name} com água`, true);
+        recordHumanAction(receiver, 'aidAlly', `recebeu ajuda de ${donor.name} com água`, true);
         return true;
       }
 
@@ -2963,6 +3165,8 @@
         receiver.teamworkCount = (receiver.teamworkCount || 0) + 1;
         addHumanScore(donor, HUMAN_SCORE_RULES.teamwork, 'Trabalho em equipe', `ajudou ${receiver.name} com alimento`);
         addHumanScore(receiver, HUMAN_SCORE_RULES.teamwork, 'Trabalho em equipe', `recebeu ajuda de ${donor.name}`);
+        recordHumanAction(donor, 'aidAlly', `ajudou ${receiver.name} com alimento`, true);
+        recordHumanAction(receiver, 'aidAlly', `recebeu ajuda de ${donor.name} com alimento`, true);
       }
       return amount > 0.15;
     }
@@ -3223,7 +3427,16 @@
           lastRunElapsedMs: civilizationArchive.lastRunElapsedMs || 0,
           averageWisdom: civilizationArchive.lastAverageWisdom || 0.5,
           averageEfficiency: civilizationArchive.lastAverageEfficiency || 0.5,
-          ancestorDeaths: civilizationArchive.ancestorDeaths.slice(-20)
+          ancestorDeaths: civilizationArchive.ancestorDeaths.slice(-20),
+          ancestorProfiles: (civilizationArchive.ancestorProfiles || []).slice(0, 12).map((profile) => ({
+            name: profile.name,
+            score: profile.score || 0,
+            generation: profile.generation || 1,
+            deathReason: profile.deathReason || 'desconhecida',
+            dominantActions: (profile.dominantActions || []).slice(0, 4)
+          })),
+          ancestralActionMemory: { ...(civilizationArchive.ancestralActionMemory || {}) },
+          ancestralScoreMemory: [...(civilizationArchive.ancestralScoreMemory || [])]
         };
         logCivilizationInheritance(civilizationArchive);
       }
@@ -3540,6 +3753,9 @@
         children: human.children || 0,
         basesBuilt: human.basesBuilt || 0,
         recentActions,
+        actionCounts: { ...(human.actionCounts || {}) },
+        scoreLog: [...(human.scoreLog || [])],
+        ancestralProfile: human.ancestralProfile ? { ...human.ancestralProfile } : null,
         summary: summaryRow
       });
       console.groupCollapsed(`☠️ ${human.name} morreu • ${deathReason}`);
@@ -3816,17 +4032,24 @@
           const shareUrgency = human.ancestralLessons?.shareUrgency || 0;
           const reproductionUrgency = human.ancestralLessons?.reproductionUrgency || 0;
           const longevityUrgency = human.ancestralLessons?.longevityUrgency || 0;
+          const ancestralBuildBias = getHumanAncestralBias(human, 'buildBase');
+          const ancestralShareBias = getHumanAncestralBias(human, 'knowledgeShare');
+          const ancestralWeaponBias = getHumanAncestralBias(human, 'craftWeapon');
+          const ancestralReproductionBias = getHumanAncestralBias(human, 'reproduce');
+          const ancestralHuntBias = getHumanAncestralBias(human, 'hunt');
+          const ancestralTeamworkBias = getHumanAncestralBias(human, 'teamwork');
+          const ancestralLegacyBonus = Math.min(10, Math.round((human.ancestralScoreMemory || 0) * 0.35));
           const agingWithoutChildren = human.ageMs > stats.ageLimit * 0.55 && (human.children || 0) === 0;
           const noChildrenYet = currentRunChildrenBorn <= 0 && simulationTimeMs > 45000;
           const lowPopulationPressure = humans.length <= 8 ? 10 : humans.length <= 12 ? 6 : humans.length <= 16 ? 3 : 0;
-          const lineagePressure = reproductionUrgency + lowPopulationPressure + (agingWithoutChildren ? 8 : 0) + (noChildrenYet ? 6 : 0);
+          const lineagePressure = reproductionUrgency + lowPopulationPressure + (agingWithoutChildren ? 8 : 0) + (noChildrenYet ? 6 : 0) + ancestralReproductionBias * 2.2 + ancestralLegacyBonus * 0.15;
           const criticalWater = risk.criticalWater || human.thirst > (58 - waterUrgency - Math.round(longevityUrgency * 0.35)) || (human.inventory.water < 2.2 && human.thirst > (36 - Math.round(waterUrgency * 0.5) - Math.round(longevityUrgency * 0.25)));
           const criticalFood = risk.criticalFood || human.hunger > (62 - foodUrgency - Math.round(longevityUrgency * 0.35)) || (foodAmount < 3 && human.hunger > (38 - Math.round(foodUrgency * 0.5) - Math.round(longevityUrgency * 0.2)));
           const lowEnergy = risk.lowEnergy || human.energy < Math.max(18, 26 + longevityUrgency * 0.6);
           const survivalPressureNow = criticalWater || criticalFood || risk.criticalHealth || risk.recentDamage || human.health < (42 + longevityUrgency * 1.1);
           const baseWoodAvailable = (human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood');
           const baseStoneAvailable = (human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone');
-          const canReproduce = human.ageMs >= HUMAN_MATURE_AGE_MS && human.reproductionCooldownMs <= 0 && human.health > (lineagePressure >= 8 ? 42 : 48) && human.energy > (lineagePressure >= 8 ? 18 : 22) && human.hunger < (lineagePressure >= 8 ? 82 : 76) && human.thirst < (lineagePressure >= 8 ? 80 : 74) && humans.length < HUMAN_POPULATION_CAP && !!nearestBase;
+          const canReproduce = human.ageMs >= HUMAN_MATURE_AGE_MS && human.reproductionCooldownMs <= 0 && human.health > (lineagePressure >= 8 ? 42 : 48) && human.energy > Math.max(14, (lineagePressure >= 8 ? 18 : 22) - ancestralReproductionBias * 2.2) && human.hunger < Math.min(90, (lineagePressure >= 8 ? 82 : 76) + ancestralReproductionBias * 2.5) && human.thirst < Math.min(88, (lineagePressure >= 8 ? 80 : 74) + ancestralReproductionBias * 2.5) && humans.length < HUMAN_POPULATION_CAP && !!nearestBase;
           const carryingResources = human.inventory.food + human.inventory.water + human.inventory.meat + human.inventory.wood + human.inventory.stone + human.inventory.medicine > 12;
           const needsHeal = human.knownActions.includes('curar') && !!nearestBase && (human.health < 82 || risk.recentDamage);
           const needsMoreBases = bases.length < desiredBaseCount;
@@ -3834,9 +4057,9 @@
           const siteNeedsWood = activeBuildSite ? getBuildSiteMissing(activeBuildSite, 'wood') > 0.4 : false;
           const siteNeedsStone = activeBuildSite ? getBuildSiteMissing(activeBuildSite, 'stone') > 0.4 : false;
           const buildReadiness = getBaseBuildReadiness(human, nearestBase);
-          const buildUrgencyFactor = baseUrgency > 0 ? Math.max(0.32, 0.6 - baseUrgency * 0.015 - lineagePressure * 0.01) : Math.max(0.34, 0.6 - lineagePressure * 0.01);
+          const buildUrgencyFactor = baseUrgency > 0 ? Math.max(0.24, 0.6 - baseUrgency * 0.015 - lineagePressure * 0.01 - ancestralBuildBias * 0.05) : Math.max(0.26, 0.6 - lineagePressure * 0.01 - ancestralBuildBias * 0.05);
           const tribeBuildSoon = !nearestBase && !buildSites.length && collectiveWood >= HUMAN_BASE_BUILD_COST.wood * buildUrgencyFactor && collectiveStone >= HUMAN_BASE_BUILD_COST.stone * buildUrgencyFactor;
-          const canStartBuildSite = human.knownActions.includes('construir base') && needsMoreBases && !buildSites.length && human.ageMs >= HUMAN_MATURE_AGE_MS * 0.55 && ((buildReadiness.members >= 2 && buildReadiness.canBuildSoon) || tribeBuildSoon);
+          const canStartBuildSite = human.knownActions.includes('construir base') && needsMoreBases && !buildSites.length && human.ageMs >= HUMAN_MATURE_AGE_MS * Math.max(0.35, 0.55 - ancestralBuildBias * 0.08) && ((buildReadiness.members >= Math.max(1, 2 - Math.round(ancestralTeamworkBias * 0.5)) && buildReadiness.canBuildSoon) || tribeBuildSoon || (ancestralBuildBias >= 1.1 && collectiveWood >= HUMAN_BASE_BUILD_COST.wood * 0.72 && collectiveStone >= HUMAN_BASE_BUILD_COST.stone * 0.72));
           const shouldContributeToBuild = !!activeBuildSite && ((human.inventory.wood || 0) > 0.4 || (human.inventory.stone || 0) > 0.4 || buildReadiness.siteReady);
           const tribeNeedsBaseUrgently = !nearestBase && (buildReadiness.canBuildSoon || buildReadiness.siteReady || tribeBuildSoon || (lineagePressure >= 8 && buildReadiness.members >= 2)) && !criticalWater && !criticalFood;
           const needsWood = human.knownActions.includes('coletar madeira') && ((needsMoreBases && (!nearestBase || !activeBuildSite || siteNeedsWood || collectiveWood + (activeBuildSite ? activeBuildSite.stored.wood : 0) < HUMAN_BASE_BUILD_COST.wood)) || (nearestBase && getBaseStock(nearestBase, 'wood') < 10) || (lineagePressure >= 8 && !nearestBase && collectiveWood < HUMAN_BASE_BUILD_COST.wood));
@@ -3844,8 +4067,8 @@
           const baseNeedsFood = nearestBase && (getBaseStock(nearestBase, 'food') + getBaseStock(nearestBase, 'meat')) < Math.max(6, humans.length * 0.7);
           const baseNeedsWater = nearestBase && getBaseStock(nearestBase, 'water') < Math.max(6, humans.length * 0.75);
           const baseNeedsRepair = nearestBase && nearestBase.integrity < 78 && (human.inventory.wood > 1 || human.inventory.stone > 1);
-          const wantsKnowledgeExchange = human.knownActions.includes('trocar informações') && nearbyHuman && (!survivalPressureNow || shareUrgency >= 4) && (human.aidCooldownMs || 0) <= 0 && humansCanExchangeKnowledge(human, nearbyHuman);
-          const shouldCraftForSurvival = ((human.inventory.weapon || 0) < 1) && (((human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood')) >= 3) && (((human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone')) >= 2) && !criticalWater && !criticalFood && (tribeUnderArmed || risk.recentDamage || human.health < 88 || weaponUrgency >= 4);
+          const wantsKnowledgeExchange = human.knownActions.includes('trocar informações') && nearbyHuman && (!survivalPressureNow || shareUrgency >= 4 || ancestralShareBias >= 0.85) && (human.aidCooldownMs || 0) <= 0 && humansCanExchangeKnowledge(human, nearbyHuman);
+          const shouldCraftForSurvival = ((human.inventory.weapon || 0) < 1) && (((human.inventory.wood || 0) + getBaseStock(nearestBase, 'wood')) >= 3) && (((human.inventory.stone || 0) + getBaseStock(nearestBase, 'stone')) >= 2) && !criticalWater && !criticalFood && (tribeUnderArmed || risk.recentDamage || human.health < 88 || weaponUrgency >= 4 || ancestralWeaponBias >= 0.8 || ancestralHuntBias >= 0.9);
           const feelsCrowded = !!nearbyHuman && distanceSq(human.x, human.y, nearbyHuman.x, nearbyHuman.y) < (TILE_SIZE * 1.7) ** 2;
           const hasCommittedTask = human.taskCommitMs > 0 && !survivalPressureNow && !feelsCrowded;
 
@@ -3881,7 +4104,7 @@
               } else {
                 const prey = findNearestAnimal(human, stats.vision * 1.55, (animal) => humanCanHuntSpecies(human, animal.speciesId));
                 const nearbyAlly = findNearestHuman(human, TILE_SIZE * 6, (other) => other.health > 60 && other.energy > 35);
-                if (prey && (human.genes.courage > 0.38 || nearbyAlly || (human.inventory.weapon || 0) > 0)) {
+                if (prey && (human.genes.courage > 0.38 || nearbyAlly || (human.inventory.weapon || 0) > 0 || ancestralHuntBias >= 0.85)) {
                   targetAnimal = prey;
                   assignHumanTarget(human, 'hunt', 'hunt', prey.x, prey.y, `animal:${prey.id}`, 4800);
                 } else {
@@ -3980,7 +4203,7 @@
                 assignHumanTarget(human, kind, kind, easyFood.x, easyFood.y, null, 4200);
               } else {
                 const prey = findNearestAnimal(human, stats.vision * 1.7, (animal) => humanCanHuntSpecies(human, animal.speciesId));
-                if (prey) {
+                if (prey && (human.genes.courage > 0.28 || (human.inventory.weapon || 0) > 0 || ancestralHuntBias >= 0.85 || ancestralLegacyBonus >= 4)) {
                   targetAnimal = prey;
                   assignHumanTarget(human, 'hunt', 'hunt', prey.x, prey.y, `animal:${prey.id}`, 4200);
                 } else {
@@ -4116,7 +4339,7 @@
                 <div class="species-name">${human.name} • G${human.generation} • ${human.sex}</div>
                 <div class="species-sub">${humanReadableMode(human.mode)} • Vida ${Math.round(human.health)} • Fome ${Math.round(human.hunger)} • Sede ${Math.round(human.thirst)} • Score ${human.score || 0}</div>
                 <div class="species-sub">Base ${homeBase ? homeBase.name : 'nenhuma'} • Ações ${knownActions} • Filhos ${human.children || 0} • Bases ${human.basesBuilt || 0} • Caças ${human.successfulHunts || 0}</div>
-                <div class="species-sub">Madeira ${Math.round(human.inventory.wood)} • Pedra ${Math.round(human.inventory.stone)} • Arma ${(human.inventory.weapon || 0) > 0 ? 'Sim' : 'Não'} • Tocha ${(human.inventory.torch || 0) > 0 ? 'Sim' : 'Não'}${recentScore ? ` • Último score ${recentScore.valor > 0 ? '+' : ''}${recentScore.valor} (${recentScore.motivo})` : ''}</div>
+                <div class="species-sub">Mentor ancestral ${human.ancestralProfile ? `${human.ancestralProfile.name} (${human.ancestralProfile.score || 0} pts)` : 'nenhum'} • Madeira ${Math.round(human.inventory.wood)} • Pedra ${Math.round(human.inventory.stone)} • Arma ${(human.inventory.weapon || 0) > 0 ? 'Sim' : 'Não'} • Tocha ${(human.inventory.torch || 0) > 0 ? 'Sim' : 'Não'}${recentScore ? ` • Último score ${recentScore.valor > 0 ? '+' : ''}${recentScore.valor} (${recentScore.motivo})` : ''}</div>
               </div>
             </div>
             <div class="species-meta">
