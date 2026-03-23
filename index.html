@@ -955,7 +955,7 @@
       oldAgeFailure: -1,
       buildBase: 2,
       reproduce: 1,
-      knowledgeShare: 1,
+      knowledgeShare: 0,
       teamwork: 2,
       craftWeapon: 1,
       huntDeath: -1,
@@ -3358,8 +3358,6 @@
         b.taskCommitMs = Math.max(b.taskCommitMs || 0, 900);
         a.knowledgeShares = (a.knowledgeShares || 0) + 1;
         b.knowledgeShares = (b.knowledgeShares || 0) + 1;
-        addHumanScore(a, HUMAN_SCORE_RULES.knowledgeShare, 'Troca de informações', `compartilhou com ${b.name}`);
-        addHumanScore(b, HUMAN_SCORE_RULES.knowledgeShare, 'Troca de informações', `compartilhou com ${a.name}`);
         recordHumanAction(a, 'knowledgeShare', `compartilhou com ${b.name}`, true);
         recordHumanAction(b, 'knowledgeShare', `compartilhou com ${a.name}`, true);
       }
