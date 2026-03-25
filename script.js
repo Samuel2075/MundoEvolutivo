@@ -143,7 +143,6 @@ function mlComputeReward(human, prevState, dtMs) {
 }
 
 async function pingHumanBackend(force = false) {
-async function pingHumanBackend(force = false) {
     const now = performance.now();
     if (!force && now - lastHumanBackendPingAt < HUMAN_BACKEND_PING_INTERVAL_MS) return humanBackendOnline;
 
