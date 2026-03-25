@@ -193,13 +193,21 @@ async function flushHumanBackendDecisionQueue() {
         const qValuesList = Array.isArray(data?.q_values) ? data.q_values : [];
         const actions = Array.isArray(data?.actions) ? data.actions : [];
         validHumans.forEach((human, index) => {
-            const qValues = Array.isArray(qValuesList[index]) ? qValuesList[index].map((value) => Number(value) || 0) : null;
-            if (qValues && qValues.length === ML_OUTPUT_SIZE) human.backendQValues = qValues;
+            const qValues = Array.isArray(qValuesList[index])
+                ? qValuesList[index].map((value) => Number(value) || 0)
+                : null;
+
+            if (qValues && qValues.length === ML_OUTPUT_SIZE) {
+                human.backendQValues = qValues;
+                updateHumanKnowledgeFromTensorFlow(human, qValues);
+            }
+
             const actionIndex = Number(actions[index]);
             if (Number.isFinite(actionIndex) && actionIndex >= 0 && actionIndex < ML_OUTPUT_SIZE) {
                 human.backendActionIndex = actionIndex;
                 human.lastBackendActionName = TF_ACTIONS[actionIndex];
             }
+
             human.lastBackendDecisionAt = performance.now();
         });
     } catch (error) {
@@ -207,6 +215,33 @@ async function flushHumanBackendDecisionQueue() {
     } finally {
         humanBackendBusy = false;
     }
+}
+
+function updateHumanKnowledgeFromTensorFlow(human, qValues) {
+    if (!human || !Array.isArray(qValues) || !qValues.length) return;
+
+    const sorted = [...qValues].sort((a, b) => b - a);
+    const bestQ = Number(sorted[0] || 0);
+    const secondQ = Number(sorted[1] || 0);
+    const confidenceGap = Math.max(0, bestQ - secondQ);
+
+    const prevKnowledge = Number(human.knowledge || 0);
+    const inherited = Number(human.inheritedKnowledge || 0);
+
+    const rewardSignal = Number(human.lastMLReward || 0);
+    const decisionSignal = (bestQ * 0.55) + (confidenceGap * 0.35) + (rewardSignal * 0.10);
+
+    const boundedSignal = clamp(decisionSignal, -1.5, 3.0);
+
+    human.knowledge = clamp(
+        prevKnowledge + boundedSignal * 0.6,
+        0,
+        100
+    );
+
+    human.knowledgeDisplay = Math.round(
+        (human.knowledge * 0.8) + (inherited * 0.2)
+    );
 }
 
 function queueHumanBackendTrainingSample(sample) {
