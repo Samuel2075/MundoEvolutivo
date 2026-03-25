@@ -4078,10 +4078,25 @@ function updateHumans(dtMs, now) {
 
 function buildHumanLegend() {
     if (!humanLegend) return;
-    const sortedHumans = [...humans].sort((a, b) => (b.score || 0) - (a.score || 0) || b.generation - a.generation || b.health - a.health || a.id - b.id);
+
+    const sortedHumans = [...humans].sort((a, b) =>
+        (b.score || 0) - (a.score || 0) ||
+        b.generation - a.generation ||
+        b.health - a.health ||
+        a.id - b.id
+    );
+
     humanLegend.innerHTML = sortedHumans.map((human) => {
-        const tfConfidence = Math.round(clamp((human.mlUpdateCounter || 0) / 80, 0, 1) * (human.genes?.wisdom || 1) * 100);
+        const learningLevel = Math.round(human.knowledge || human.inheritedKnowledge || 0);
+        const decisionSource = human.lastBackendActionName ? 'TensorFlow' : 'regras locais';
+        const backendStatus = humanBackendOnline ? 'conectado' : 'indisponível';
         const currentAction = human.currentTensorflowAction || human.lastBackendActionName || 'explorar';
+
+        const adaptationPercent = Math.round(
+            clamp((human.mlUpdateCounter || 0) / 80, 0, 1) *
+            (human.genes?.wisdom || 1) * 100
+        );
+
         return `
           <div class="species-entry human-focus-target" data-human-id="${human.id}">
             <div class="species-main">
@@ -4089,7 +4104,7 @@ function buildHumanLegend() {
               <div class="species-info">
                 <div class="species-name">${human.name} • ${currentAction} • ❤️${Math.round(human.health)}</div>
                 <div class="species-sub">Energia ${Math.round(human.energy)} • Idade ${Math.floor(human.ageMs / 1000 * 0.21)} anos • Posição ${Math.round(human.x)}, ${Math.round(human.y)}</div>
-                <div class="species-sub">TensorFlow ${humanBackendOnline ? 'online' : 'offline'} • Confiança ${tfConfidence}% • Conhecimento ${Math.round(human.knowledge || human.inheritedKnowledge || 0)}</div>
+                <div class="species-sub">Decisão: ${decisionSource} • Backend: ${backendStatus} • Adaptação: ${adaptationPercent}% • Conhecimento: ${learningLevel}</div>
               </div>
             </div>
           </div>
