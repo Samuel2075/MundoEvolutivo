@@ -77,7 +77,7 @@ const TF_ACTIONS = [
     'trocar recursos'
 ];
 const ML_OUTPUT_SIZE = TF_ACTIONS.length;
-const HUMAN_BACKEND_URL = 'http://160.34.218.58:5000';
+const HUMAN_BACKEND_URL = 'https://mime-requests-barrel-belle.trycloudflare.com';
 let humanBackendOnline = false;
 let humanBackendBusy = false;
 let humanBackendTrainingBusy = false;
