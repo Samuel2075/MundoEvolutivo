@@ -416,6 +416,7 @@ let civilizationArchive = createEmptyCivilizationArchive();
 let extinctionModalActive = false;
 let currentCycleFinalized = false;
 let currentCycleSummary = null;
+let pendingCycleSummary = null;
 
 let camera = {
     x: WORLD_WIDTH * 0.5,
@@ -2213,6 +2214,7 @@ function closeCycleModal() {
 }
 
 function openCycleModal(summary) {
+    pendingCycleSummary = summary;
     if (!cycleModalOverlay || !cycleModalBody || !summary) return;
 
     const runSummary = summary.runSummary;
@@ -2352,15 +2354,31 @@ async function sendCycleKnowledgeToBackend(summary) {
 }
 
 async function restartNextCycleFromSummary() {
-    const summary = finalizeCurrentCycle();
+    const summary = pendingCycleSummary || currentCycleSummary;
+    if (!summary) return;
+
     if (cycleModalRestartButton) cycleModalRestartButton.disabled = true;
+
     try {
-        await sendCycleKnowledgeToBackend(summary);
-    } finally {
+        const backendResult = await sendCycleKnowledgeToBackend(summary);
+
+        if (!backendResult) {
+            console.warn('Falha ao enviar memória ancestral ao TensorFlow.');
+            return;
+        }
+
         closeCycleModal();
         regenerateWorld(summary.inheritedArchive);
+
+        pendingCycleSummary = null;
+        extinctionModalActive = false;
         simRunning = true;
+
         requestRender();
+
+    } catch (error) {
+        console.error('Erro ao reiniciar ciclo:', error);
+    } finally {
         if (cycleModalRestartButton) cycleModalRestartButton.disabled = false;
     }
 }
