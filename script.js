@@ -77,7 +77,7 @@ const TF_ACTIONS = [
     'trocar recursos'
 ];
 const ML_OUTPUT_SIZE = TF_ACTIONS.length;
-const HUMAN_BACKEND_URL = 'https://mime-requests-barrel-belle.trycloudflare.com';
+const HUMAN_BACKEND_URL = 'https://founder-musician-behavior-public.trycloudflare.com';
 let humanBackendOnline = false;
 let humanBackendBusy = false;
 let humanBackendTrainingBusy = false;
