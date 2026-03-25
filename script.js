@@ -2333,7 +2333,15 @@ async function sendCycleKnowledgeToBackend(summary) {
             ...(summary.runSummary || {}),
             action_totals: summary.runSummary?.actionTotals || {},
             deaths_by_reason: summary.runSummary?.deathsByReason || {},
-            mentors: summary.runSummary?.mentorHumans || []
+            mentors: (summary.runSummary?.mentorHumans || []).map((h) => ({
+                id: h.id,
+                name: h.name,
+                score: h.score || 0,
+                generation: h.generation || 1,
+                knowledge: h.knowledge || 0,
+                children: h.children || 0,
+                basesBuilt: h.basesBuilt || 0
+            }))
         },
         timestamp_ms: Date.now()
     };
@@ -2341,10 +2349,13 @@ async function sendCycleKnowledgeToBackend(summary) {
     console.log('Payload enviado para /inherit_cycle:', payload);
 
     try {
+        const body = JSON.stringify(payload);
+        console.log('Payload serializado. Tamanho:', body.length);
+
         const response = await fetch(`${HUMAN_BACKEND_URL}/inherit_cycle`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body
         });
 
         console.log('Status HTTP /inherit_cycle:', response.status);
@@ -3624,38 +3635,6 @@ function makeHumanUtilityCandidate(human, candidate) {
     result.score += getHumanActionContinuityBonus(human, result);
     result.score -= getHumanActionPenalty(human, actionKey);
     return result;
-}
-
-function applyHumanUtilityDecision(human, decision) {
-    if (!decision) {
-        pickHumanWanderTarget(human, 'general');
-        return;
-    }
-    if (decision.wanderPurpose) {
-        pickHumanWanderTarget(human, decision.wanderPurpose);
-        return;
-    }
-    if (decision.startBuildSite) {
-        // Antes de criar obra nova, verifica se já existe uma acessível no mundo
-        const existingSite = findNearestBuildSite(human, TILE_SIZE * 40);
-        if (existingSite) {
-            // Redireciona para obra existente em vez de criar outra
-            assignHumanTarget(human, 'buildBase', 'buildBase', existingSite.x, existingSite.y, `site:${existingSite.id}`, decision.commitMs || 4200);
-        } else {
-            const site = createBuildSite(decision.x, decision.y, human);
-            assignHumanTarget(human, decision.mode || 'buildBase', decision.targetKind || 'buildBase', site.x, site.y, `site:${site.id}`, decision.commitMs || 4200);
-        }
-        return;
-    }
-    assignHumanTarget(
-        human,
-        decision.mode || decision.targetKind || 'wander',
-        decision.targetKind || decision.mode || 'wander',
-        decision.x != null ? decision.x : human.x,
-        decision.y != null ? decision.y : human.y,
-        decision.ref || null,
-        decision.commitMs || 3200
-    );
 }
 
 function findUtilityReproductionPartner(human, stats) {
