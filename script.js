@@ -28,7 +28,7 @@ const SIM_TICK_MS = 140;
 const HUMAN_DRAW_ZOOM_THRESHOLD = 0.14;
 const ENTITY_LABEL_ZOOM_THRESHOLD = 0.2;
 const HUMAN_POPULATION_CAP = 80;
-const HUMAN_MATURE_AGE_MS = 24000;
+const HUMAN_MATURE_AGE_MS = 20000;
 const HOSTILE_TO_HUMANS = new Set(['wolf', 'lynx', 'bear', 'hyena', 'crocodile', 'eagle', 'boar']);
 const HUMAN_MAX_AGE_MS = 380000;
 const HUMAN_MAX_LIFESPAN_MS = 5 * 60 * 1000;
@@ -40,21 +40,21 @@ const HUMAN_TRAIT_KEYS = ['speed', 'vision', 'courage', 'efficiency', 'fertility
 const HUMAN_ALLOWED_BIOMES = ['plains', 'forest', 'swamp', 'mountain'];
 const EDIBLE_RESOURCE_TYPES = new Set(['berry', 'mushroom', 'cactus', 'fish', 'herb']);
 const HUMAN_ACTION_LIBRARY = [
-  'beber água',
-  'explorar',
-  'caçar',
-  'pescar',
-  'coletar recursos',
-  'construir base',
-  'armazenar',
-  'descansar',
-  'curar',
-  'acasalar',
-  'ajudar aliado',
-  'trocar informações',
-  'fugir',
-  'reparar base',
-  'trocar recursos'
+    'beber água',
+    'explorar',
+    'caçar',
+    'pescar',
+    'coletar recursos',
+    'construir base',
+    'armazenar',
+    'descansar',
+    'curar',
+    'acasalar',
+    'ajudar aliado',
+    'trocar informações',
+    'fugir',
+    'reparar base',
+    'trocar recursos'
 ];
 const HUMAN_DIRECT_FOOD_TYPES = new Set(['berry', 'mushroom', 'cactus', 'fish']);
 const HUMAN_GROUP_DEFENSE_RADIUS = TILE_SIZE * 5.2;
@@ -106,8 +106,8 @@ let humanBackendTrainQueue = [];
 
 // ── Epsilon-greedy: exploração com decaimento ─────────────────────────────────
 // Começa explorando 25% do tempo, decai até 5% ao longo de 8 min de simulação
-const ML_EPSILON_START    = 0.25;
-const ML_EPSILON_END      = 0.05;
+const ML_EPSILON_START = 0.25;
+const ML_EPSILON_END = 0.05;
 const ML_EPSILON_DECAY_MS = 8 * 60 * 1000;
 let mlEpsilon = ML_EPSILON_START;
 
@@ -119,9 +119,9 @@ function mlGetCurrentEpsilon() {
 
 // ── Experience Replay Buffer ──────────────────────────────────────────────────
 // Acumula experiências e sorteia batches aleatórios — quebra correlação temporal
-const REPLAY_BUFFER_MAX    = 1000;
-const REPLAY_BATCH_SIZE    = 48;
-const REPLAY_MIN_TO_TRAIN  = 64;
+const REPLAY_BUFFER_MAX = 1000;
+const REPLAY_BATCH_SIZE = 48;
+const REPLAY_MIN_TO_TRAIN = 64;
 let replayBuffer = [];
 
 function replayBufferAdd(sample) {
@@ -188,6 +188,10 @@ function mlComputeReward(human, prevState, dtMs) {
 
     let reward = 0.05;
 
+    const actionName = human.currentTensorflowAction || human.lastBackendActionName || '';
+    const validation = human.lastActionValidation || '';
+    const actionWasValid = human.lastActionWasValid !== false;
+
     // sobrevivência básica
     reward += ((human.health - prevState.health) / 100) * 1.6;
     reward += ((prevState.hunger - human.hunger) / 100) * 1.4;
@@ -208,7 +212,12 @@ function mlComputeReward(human, prevState, dtMs) {
     if (human.energy < 15) reward -= 0.65;
 
     // gastar energia sem benefício é ruim
-    if (human.energy < prevState.energy && human.health <= prevState.health && human.hunger >= prevState.hunger && human.thirst >= prevState.thirst) {
+    if (
+        human.energy < prevState.energy &&
+        human.health <= prevState.health &&
+        human.hunger >= prevState.hunger &&
+        human.thirst >= prevState.thirst
+    ) {
         reward -= 0.25;
     }
 
@@ -220,11 +229,11 @@ function mlComputeReward(human, prevState, dtMs) {
     if ((human.teamworkCount || 0) > (prevState.teamworkCount || 0)) reward += 0.7;
 
     // descanso e cura bem sucedidos
-    if ((human.currentTensorflowAction === 'descansar' || human.mode === 'rest') && human.energy > prevState.energy) {
+    if ((actionName === 'descansar' || human.mode === 'rest') && human.energy > prevState.energy) {
         reward += 0.45;
     }
 
-    if ((human.currentTensorflowAction === 'curar' || human.mode === 'heal') && human.health > prevState.health) {
+    if ((actionName === 'curar' || human.mode === 'heal') && human.health > prevState.health) {
         reward += 0.55;
     }
 
@@ -249,6 +258,30 @@ function mlComputeReward(human, prevState, dtMs) {
     // morte pune mais
     if (!human.alive) {
         reward -= 3.0;
+    }
+
+    // punições por ação inválida / sem sentido no contexto
+    if (!actionWasValid) {
+        if (validation === 'invalid_not_thirsty') reward -= 0.22;
+        if (validation === 'invalid_not_hungry') reward -= 0.22;
+        if (validation === 'invalid_no_water') reward -= 0.35;
+        if (validation === 'invalid_no_resource_nearby') reward -= 0.35;
+        if (validation === 'invalid_no_fish_nearby') reward -= 0.35;
+        if (validation === 'invalid_no_prey_nearby') reward -= 0.28;
+        if (validation === 'invalid_no_partner') reward -= 0.4;
+        if (validation === 'invalid_reproduction_cooldown') reward -= 0.28;
+        if (validation === 'invalid_low_condition') reward -= 0.25;
+        if (validation === 'invalid_rest_not_needed') reward -= 0.15;
+        if (validation === 'invalid_heal_not_needed') reward -= 0.18;
+        if (validation === 'invalid_no_threat') reward -= 0.18;
+        if (validation === 'invalid_no_base') reward -= 0.22;
+        if (validation === 'invalid_nothing_to_store') reward -= 0.2;
+        if (validation === 'invalid_cannot_build_here') reward -= 0.25;
+        if (validation === 'invalid_missing_build_resources') reward -= 0.3;
+        if (validation === 'invalid_no_ally_nearby') reward -= 0.18;
+        if (validation === 'invalid_no_partner_for_info') reward -= 0.12;
+        if (validation === 'invalid_no_partner_for_exchange') reward -= 0.14;
+        if (validation === 'invalid_base_not_damaged') reward -= 0.15;
     }
 
     return clamp(reward, -4.0, 5.0);
@@ -3853,16 +3886,16 @@ function makeHumanUtilityCandidate(human, candidate) {
 }
 
 function findUtilityReproductionPartner(human, stats) {
-    return findNearestHuman(human, stats.vision * 1.35, (other) => {
+    return findNearestHuman(human, stats.vision * 1.4, (other) => {
         return other.alive &&
             other.id !== human.id &&
             other.sex !== human.sex &&
             other.ageMs >= HUMAN_MATURE_AGE_MS &&
             other.reproductionCooldownMs <= 0 &&
-            other.health > 40 &&
-            other.energy > 14 &&
-            other.hunger < 86 &&
-            other.thirst < 84;
+            other.health > 30 &&
+            other.energy > 10 &&
+            other.hunger < 95 &&
+            other.thirst < 95;
     });
 }
 
@@ -3956,93 +3989,385 @@ function getHumanEmergencyUtilityDecision(human, ctx) {
 
 function buildTensorflowDecision(human, ctx, actionName) {
     const stats = ctx.stats;
+
+    const invalid = (outcome) => ({
+        mode: 'idle',
+        targetKind: 'failed',
+        valid: false,
+        outcome,
+        commitMs: 400
+    });
+
+    const success = (payload) => ({
+        valid: true,
+        outcome: 'valid',
+        ...payload
+    });
+
     switch (actionName) {
         case 'beber água': {
+            if ((human.thirst || 0) < 25) {
+                return invalid('invalid_not_thirsty');
+            }
+
             const target = findHumanEmergencyTarget(human, 'water', stats);
             if (target) {
-                return {
+                return success({
                     mode: target.kind === 'aidWater' ? 'aidAlly' : 'drink',
                     targetKind: target.kind,
                     x: target.x,
                     y: target.y,
                     ref: target.ref || null,
                     commitMs: 4200
-                };
+                });
             }
+
             if (ctx.nearestBase && getBaseStock(ctx.nearestBase, 'water') > 0.5) {
-                return { mode: 'rest', targetKind: 'rest', x: ctx.nearestBase.x, y: ctx.nearestBase.y, ref: `base:${ctx.nearestBase.id}`, commitMs: 2800 };
+                return success({
+                    mode: 'rest',
+                    targetKind: 'rest',
+                    x: ctx.nearestBase.x,
+                    y: ctx.nearestBase.y,
+                    ref: `base:${ctx.nearestBase.id}`,
+                    commitMs: 2800
+                });
             }
-            return { wanderPurpose: 'water', score: 0 };
+
+            return invalid('invalid_no_water');
         }
+
         case 'caçar': {
-            const prey = findNearestAnimal(human, stats.vision * 1.7, (animal) => humanCanHuntSpecies(human, animal.speciesId));
-            if (prey) return { mode: 'hunt', targetKind: 'hunt', x: prey.x, y: prey.y, ref: `animal:${prey.id}`, commitMs: 4200 };
-            return { wanderPurpose: 'food', score: 0 };
+            const prey = findNearestAnimal(
+                human,
+                stats.vision * 1.7,
+                (animal) => humanCanHuntSpecies(human, animal.speciesId)
+            );
+
+            if (prey) {
+                return success({
+                    mode: 'hunt',
+                    targetKind: 'hunt',
+                    x: prey.x,
+                    y: prey.y,
+                    ref: `animal:${prey.id}`,
+                    commitMs: 4200
+                });
+            }
+
+            return invalid('invalid_no_prey_nearby');
         }
+
         case 'pescar': {
-            const fish = getHumanMemoryTarget(human, 'fish') || findNearestResource(human, stats.vision * 2.1, new Set(['fish'])) || findNearestResourceGlobal(human, new Set(['fish']), TILE_SIZE * 48);
-            if (fish) return { mode: 'fish', targetKind: 'fish', x: fish.x, y: fish.y, ref: fish.ref || `resource:${fish.x}:${fish.y}`, commitMs: 3800 };
-            return { wanderPurpose: 'water', score: 0 };
+            const fish =
+                getHumanMemoryTarget(human, 'fish') ||
+                findNearestResource(human, stats.vision * 2.1, new Set(['fish'])) ||
+                findNearestResourceGlobal(human, new Set(['fish']), TILE_SIZE * 48);
+
+            if (fish) {
+                return success({
+                    mode: 'fish',
+                    targetKind: 'fish',
+                    x: fish.x,
+                    y: fish.y,
+                    ref: fish.ref || `resource:${fish.x}:${fish.y}`,
+                    commitMs: 3800
+                });
+            }
+
+            return invalid('invalid_no_fish_nearby');
         }
+
         case 'coletar recursos': {
             const resourceTarget = findNearestGatherableResource(human, stats);
-            if (resourceTarget) return resourceTarget;
-            return { wanderPurpose: 'general', score: 0 };
-        }
-        case 'construir base': {
-            if (ctx.activeBuildSite) return { mode: 'buildBase', targetKind: 'buildBase', x: ctx.activeBuildSite.x, y: ctx.activeBuildSite.y, ref: `site:${ctx.activeBuildSite.id}`, commitMs: 4800 };
-            if (ctx.canStartBuildSite) {
-                const buildSpot = chooseBaseBuildSpot(human);
-                return { mode: 'buildBase', targetKind: 'buildBase', x: buildSpot.x, y: buildSpot.y, startBuildSite: true, commitMs: 5200 };
+            if (resourceTarget) {
+                return success({
+                    ...resourceTarget
+                });
             }
-            return { wanderPurpose: 'general', score: 0 };
+
+            return invalid('invalid_no_resource_nearby');
         }
+
+        case 'construir base': {
+            const collectiveWood = totalHumanInventoryResource('wood');
+            const collectiveStone = totalHumanInventoryResource('stone');
+            const hasMaterials =
+                collectiveWood >= HUMAN_BASE_BUILD_COST.wood * 0.35 &&
+                collectiveStone >= HUMAN_BASE_BUILD_COST.stone * 0.35;
+
+            if (ctx.activeBuildSite) {
+                return success({
+                    mode: 'buildBase',
+                    targetKind: 'buildBase',
+                    x: ctx.activeBuildSite.x,
+                    y: ctx.activeBuildSite.y,
+                    ref: `site:${ctx.activeBuildSite.id}`,
+                    commitMs: 4800
+                });
+            }
+
+            if (ctx.canStartBuildSite) {
+                if (!hasMaterials) {
+                    return invalid('invalid_missing_build_resources');
+                }
+
+                const buildSpot = chooseBaseBuildSpot(human);
+                return success({
+                    mode: 'buildBase',
+                    targetKind: 'buildBase',
+                    x: buildSpot.x,
+                    y: buildSpot.y,
+                    startBuildSite: true,
+                    commitMs: 5200
+                });
+            }
+
+            return invalid('invalid_cannot_build_here');
+        }
+
         case 'armazenar': {
-            if (ctx.nearestBase) return { mode: 'store', targetKind: 'store', x: ctx.nearestBase.x, y: ctx.nearestBase.y, ref: `base:${ctx.nearestBase.id}`, commitMs: 2600 };
-            return { wanderPurpose: 'general', score: 0 };
+            const hasAnythingToStore =
+                (human.inventory.food || 0) > 0 ||
+                (human.inventory.water || 0) > 0 ||
+                (human.inventory.wood || 0) > 0 ||
+                (human.inventory.stone || 0) > 0 ||
+                (human.inventory.meat || 0) > 0;
+
+            if (!ctx.nearestBase) {
+                return invalid('invalid_no_base');
+            }
+
+            if (!hasAnythingToStore) {
+                return invalid('invalid_nothing_to_store');
+            }
+
+            return success({
+                mode: 'store',
+                targetKind: 'store',
+                x: ctx.nearestBase.x,
+                y: ctx.nearestBase.y,
+                ref: `base:${ctx.nearestBase.id}`,
+                commitMs: 2600
+            });
         }
+
         case 'descansar': {
-            if (ctx.nearestBase) return { mode: 'rest', targetKind: 'rest', x: ctx.nearestBase.x, y: ctx.nearestBase.y, ref: `base:${ctx.nearestBase.id}`, commitMs: 3200 };
-            return { mode: 'rest', targetKind: 'restOutside', x: human.x, y: human.y, ref: `rest:${human.id}`, commitMs: 1800 };
+            if ((human.energy || 0) > 85 && (human.health || 0) > 90) {
+                return invalid('invalid_rest_not_needed');
+            }
+
+            if (ctx.nearestBase) {
+                return success({
+                    mode: 'rest',
+                    targetKind: 'rest',
+                    x: ctx.nearestBase.x,
+                    y: ctx.nearestBase.y,
+                    ref: `base:${ctx.nearestBase.id}`,
+                    commitMs: 3200
+                });
+            }
+
+            return success({
+                mode: 'rest',
+                targetKind: 'restOutside',
+                x: human.x,
+                y: human.y,
+                ref: `rest:${human.id}`,
+                commitMs: 1800
+            });
         }
+
         case 'curar': {
-            if (ctx.nearestBase) return { mode: 'heal', targetKind: 'rest', x: ctx.nearestBase.x, y: ctx.nearestBase.y, ref: `base:${ctx.nearestBase.id}`, commitMs: 3200 };
-            return { mode: 'heal', targetKind: 'restOutside', x: human.x, y: human.y, ref: `self-heal:${human.id}`, commitMs: 1800 };
+            if ((human.health || 0) > 85) {
+                return invalid('invalid_heal_not_needed');
+            }
+
+            if (ctx.nearestBase) {
+                return success({
+                    mode: 'heal',
+                    targetKind: 'rest',
+                    x: ctx.nearestBase.x,
+                    y: ctx.nearestBase.y,
+                    ref: `base:${ctx.nearestBase.id}`,
+                    commitMs: 3200
+                });
+            }
+
+            return success({
+                mode: 'heal',
+                targetKind: 'restOutside',
+                x: human.x,
+                y: human.y,
+                ref: `self-heal:${human.id}`,
+                commitMs: 1800
+            });
         }
+
         case 'acasalar': {
+            if ((human.reproductionCooldownMs || 0) > 0) {
+                return invalid('invalid_reproduction_cooldown');
+            }
+
+            if ((human.energy || 0) < 35 || (human.health || 0) < 45) {
+                return invalid('invalid_low_condition');
+            }
+
             const partner = findUtilityReproductionPartner(human, stats);
-            if (partner) return { mode: 'mate', targetKind: 'mate', x: partner.x, y: partner.y, ref: `human:${partner.id}`, commitMs: 3400 };
-            return { wanderPurpose: 'general', score: 0 };
+            if (partner) {
+                return success({
+                    mode: 'mate',
+                    targetKind: 'mate',
+                    x: partner.x,
+                    y: partner.y,
+                    ref: `human:${partner.id}`,
+                    commitMs: 3400
+                });
+            }
+
+            return invalid('invalid_no_partner');
         }
+
         case 'ajudar aliado': {
             const waterAid = findAidDonorForHuman(human, 'water', stats);
-            if (waterAid) return { mode: 'aidAlly', targetKind: waterAid.kind, x: waterAid.x, y: waterAid.y, ref: waterAid.ref || null, commitMs: 2600 };
+            if (waterAid) {
+                return success({
+                    mode: 'aidAlly',
+                    targetKind: waterAid.kind,
+                    x: waterAid.x,
+                    y: waterAid.y,
+                    ref: waterAid.ref || null,
+                    commitMs: 2600
+                });
+            }
+
             const foodAid = findAidDonorForHuman(human, 'food', stats);
-            if (foodAid) return { mode: 'aidAlly', targetKind: foodAid.kind, x: foodAid.x, y: foodAid.y, ref: foodAid.ref || null, commitMs: 2600 };
-            const ally = findNearestHuman(human, stats.vision * 1.25, (other) => other.alive && other.id !== human.id);
-            if (ally) return { mode: 'aidAlly', targetKind: 'aidAlly', x: ally.x, y: ally.y, ref: `human:${ally.id}`, commitMs: 2200 };
-            return { wanderPurpose: 'general', score: 0 };
+            if (foodAid) {
+                return success({
+                    mode: 'aidAlly',
+                    targetKind: foodAid.kind,
+                    x: foodAid.x,
+                    y: foodAid.y,
+                    ref: foodAid.ref || null,
+                    commitMs: 2600
+                });
+            }
+
+            const ally = findNearestHuman(
+                human,
+                stats.vision * 1.25,
+                (other) => other.alive && other.id !== human.id
+            );
+
+            if (ally) {
+                return success({
+                    mode: 'aidAlly',
+                    targetKind: 'aidAlly',
+                    x: ally.x,
+                    y: ally.y,
+                    ref: `human:${ally.id}`,
+                    commitMs: 2200
+                });
+            }
+
+            return invalid('invalid_no_ally_nearby');
         }
-        case 'trocar informações':
+
+        case 'trocar informações': {
+            const ally = findNearestHuman(
+                human,
+                stats.vision * 1.25,
+                (other) =>
+                    other.alive &&
+                    other.id !== human.id &&
+                    humansCanExchangeKnowledge(human, other)
+            );
+
+            if (ally) {
+                return success({
+                    mode: 'knowledgeShare',
+                    targetKind: 'knowledgeShare',
+                    x: ally.x,
+                    y: ally.y,
+                    ref: `human:${ally.id}`,
+                    commitMs: 1800
+                });
+            }
+
+            return invalid('invalid_no_partner_for_info');
+        }
+
         case 'trocar recursos': {
-            const ally = findNearestHuman(human, stats.vision * 1.25, (other) => other.alive && other.id !== human.id && humansCanExchangeKnowledge(human, other));
-            if (ally) return { mode: actionName === 'trocar recursos' ? 'aidAlly' : 'knowledgeShare', targetKind: 'knowledgeShare', x: ally.x, y: ally.y, ref: `human:${ally.id}`, commitMs: 1800 };
-            return { wanderPurpose: 'general', score: 0 };
+            const ally = findNearestHuman(
+                human,
+                stats.vision * 1.25,
+                (other) =>
+                    other.alive &&
+                    other.id !== human.id
+            );
+
+            if (ally) {
+                return success({
+                    mode: 'aidAlly',
+                    targetKind: 'resourceExchange',
+                    x: ally.x,
+                    y: ally.y,
+                    ref: `human:${ally.id}`,
+                    commitMs: 1800
+                });
+            }
+
+            return invalid('invalid_no_partner_for_exchange');
         }
+
         case 'fugir': {
             if (ctx.nearbyPredator) {
-                const away = normalize(human.x - ctx.nearbyPredator.x, human.y - ctx.nearbyPredator.y);
-                return { mode: 'flee', targetKind: 'flee', x: human.x + away.x * TILE_SIZE * 10, y: human.y + away.y * TILE_SIZE * 10, ref: `predator:${ctx.nearbyPredator.id}`, commitMs: 1800 };
+                const away = normalize(
+                    human.x - ctx.nearbyPredator.x,
+                    human.y - ctx.nearbyPredator.y
+                );
+
+                return success({
+                    mode: 'flee',
+                    targetKind: 'flee',
+                    x: human.x + away.x * TILE_SIZE * 10,
+                    y: human.y + away.y * TILE_SIZE * 10,
+                    ref: `predator:${ctx.nearbyPredator.id}`,
+                    commitMs: 1800
+                });
             }
-            return { wanderPurpose: 'general', score: 0 };
+
+            return invalid('invalid_no_threat');
         }
+
         case 'reparar base': {
-            if (ctx.nearestBase) return { mode: 'repairBase', targetKind: 'repairBase', x: ctx.nearestBase.x, y: ctx.nearestBase.y, ref: `base:${ctx.nearestBase.id}`, commitMs: 3600 };
-            return { wanderPurpose: 'general', score: 0 };
+            if (ctx.nearestBase && ctx.nearestBase.integrity < 95) {
+                return success({
+                    mode: 'repairBase',
+                    targetKind: 'repairBase',
+                    x: ctx.nearestBase.x,
+                    y: ctx.nearestBase.y,
+                    ref: `base:${ctx.nearestBase.id}`,
+                    commitMs: 3600
+                });
+            }
+
+            return invalid('invalid_base_not_damaged');
         }
+
         case 'explorar':
         default:
-            return { wanderPurpose: ctx.criticalWater ? 'water' : ctx.criticalFood ? 'food' : ctx.needsWood ? 'wood' : ctx.needsStone ? 'stone' : 'general', score: 0 };
+            return success({
+                wanderPurpose: ctx.criticalWater
+                    ? 'water'
+                    : ctx.criticalFood
+                        ? 'food'
+                        : ctx.needsWood
+                            ? 'wood'
+                            : ctx.needsStone
+                                ? 'stone'
+                                : 'general',
+                score: 0
+            });
     }
 }
 
@@ -4063,7 +4388,7 @@ function chooseHumanTensorflowDecision(human, ctx, dtMs) {
             teamworkCount: human.teamworkCount || 0,
             siteProgress: ctx.activeBuildSite
                 ? ((ctx.activeBuildSite.stored.wood || 0) + (ctx.activeBuildSite.stored.stone || 0)) /
-                  (HUMAN_BASE_BUILD_COST.wood + HUMAN_BASE_BUILD_COST.stone)
+                (HUMAN_BASE_BUILD_COST.wood + HUMAN_BASE_BUILD_COST.stone)
                 : 0
         }
         : null;
@@ -4081,7 +4406,7 @@ function chooseHumanTensorflowDecision(human, ctx, dtMs) {
     // Humanos em estado crítico nunca exploram — só humanos "estáveis" exploram
     const epsilon = mlGetCurrentEpsilon();
     const canExplore = humanBackendOnline && ctx.safeNow &&
-                       human.health > 40 && human.hunger < 75 && human.thirst < 75;
+        human.health > 40 && human.hunger < 75 && human.thirst < 75;
 
     if (canExplore && Math.random() < epsilon) {
         // Ação completamente aleatória — tentativa e erro real
@@ -4279,7 +4604,6 @@ async function updateHumans(dtMs, now) {
 
     flushHumanBackendDecisionQueue();
     flushHumanBackendTrainingQueue();
-    flushReplayBatchToTrainingQueue(); // sorteia batch aleatório do replay buffer
 
     const dtSeconds = dtMs / 1000;
     decayTribeKnowledge(dtMs);
@@ -4297,7 +4621,7 @@ async function updateHumans(dtMs, now) {
         const knowledgeFactor = effectiveKnowledge / 100;
         const wisdomFactor = human.genes?.wisdom || 0.5;
 
-        human.knownActions = getHumanKnownActions(human);
+        human.knownActions = HUMAN_ACTION_LIBRARY;
         human.ageMs += dtMs;
 
         human.decisionCooldownMs = Math.max(
@@ -4429,6 +4753,10 @@ async function updateHumans(dtMs, now) {
         };
 
         const tfDecision = chooseHumanTensorflowDecision(human, ctx, dtMs);
+
+        human.lastActionWasValid = tfDecision.execution?.valid !== false;
+        human.lastActionValidation = tfDecision.execution?.outcome || 'valid';
+
         commitTensorflowHumanExecution(human, tfDecision.execution);
         human.currentTensorflowAction = tfDecision.actionName;
         human.lastBackendActionName = tfDecision.actionName;
